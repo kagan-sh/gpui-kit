@@ -1646,6 +1646,94 @@ export default class Reloaded {{ render() {{ return "version {version}"; }} }}
 }
 
 #[gpui::test]
+fn named_exports_mount_repeatedly_beside_the_default_export(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "gpui-shell-named-export-mount-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        r#"
+export const notAView = 1;
+export class Side { render() { return "side"; } }
+export class Other { render() { return "other"; } }
+export default class Main { render() { return "main"; } }
+"#,
+    )
+    .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let load = |context: &mut VisualTestContext| {
+        context
+            .update(|window, cx| {
+                let (_scope, _) = crate::scope::enter_runtime(
+                    &runtime,
+                    window,
+                    cx,
+                    crate::scope::ScopePhase::Event,
+                    None,
+                );
+                runtime.load_application(&directory, "main.js")
+            })
+            .unwrap()
+    };
+
+    let application = load(&mut context);
+    for export in ["missing", "notAView"] {
+        let error = context
+            .update(|window, cx| runtime.mount_exported_view(&application, export, window, cx))
+            .err()
+            .expect("a bad export must not mount");
+        assert!(
+            error.to_string().contains(&format!("export `{export}`")),
+            "{error:#}"
+        );
+    }
+
+    let mount = |context: &mut VisualTestContext, export: &str| {
+        context
+            .update(|window, cx| runtime.mount_exported_view(&application, export, window, cx))
+            .unwrap()
+    };
+    let _default = context
+        .update(|window, cx| runtime.mount_application(&application, window, cx))
+        .unwrap();
+    let views = [
+        mount(&mut context, "Side"),
+        mount(&mut context, "Other"),
+        mount(&mut context, "Side"),
+    ];
+    let generation = |context: &mut VisualTestContext,
+                      view: &gpui::Entity<crate::view::ScriptView>| {
+        context.update(|_, cx| {
+            view.read(cx)
+                .object()
+                .application_generation()
+                .expect("a mounted application view belongs to its generation")
+        })
+    };
+    let first = generation(&mut context, &views[0]);
+    assert!(first.is_active());
+    for view in &views[1..] {
+        assert!(std::rc::Rc::ptr_eq(&first, &generation(&mut context, view)));
+    }
+    let error = context
+        .update(|window, cx| runtime.mount_application(&application, window, cx))
+        .err()
+        .expect("the default export mounts once");
+    assert!(
+        error.to_string().contains("already been mounted"),
+        "{error:#}"
+    );
+
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[gpui::test]
 fn registered_parent_can_inspect_and_materialize_a_registered_typed_child(cx: &mut TestAppContext) {
     use crate::{
         COMPONENT_REGISTRY_API_VERSION, ComponentDescriptor, ComponentMaterializer,

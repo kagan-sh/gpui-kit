@@ -58,6 +58,7 @@ const MAX_MODULE_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct ViewType {
     value: Persistent<Object<'static>>,
+    namespace: Option<Persistent<Object<'static>>>,
     module_lease: Option<ApplicationModuleLease>,
     application: Option<Rc<ApplicationGeneration>>,
 }
@@ -905,6 +906,7 @@ impl ViewType {
     fn from_panel_class(class: Persistent<Object<'static>>) -> Self {
         Self {
             value: class,
+            namespace: None,
             module_lease: None,
             application: scope::current_application_generation(),
         }
@@ -1552,6 +1554,36 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
+        self.claim(application)?;
+        self.instantiate_view_with_policy(
+            &application.view_type,
+            crate::policy::default(),
+            window,
+            cx,
+        )
+    }
+
+    /// Mounts a named exported view class of a loaded application.
+    ///
+    /// It shares the default export's namespace, policy and application
+    /// generation, and may be mounted any number of times beside the default
+    /// export, which stays single-mount. A missing export, or one that is not
+    /// a class, is an error that leaves the handle unconsumed. As for the
+    /// default export, a construction or initialization failure releases the
+    /// whole application generation.
+    pub fn mount_exported_view(
+        self: &Rc<Self>,
+        application: &LoadedApplication,
+        export: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<ScriptView>> {
+        self.check_owner(application)?;
+        let view_type = self.exported_view_type(&application.view_type, export)?;
+        self.instantiate_view_with_policy(&view_type, crate::policy::default(), window, cx)
+    }
+
+    fn check_owner(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
         anyhow::ensure!(
             application
                 .runtime
@@ -1559,16 +1591,39 @@ impl ShellRuntime {
                 .is_some_and(|runtime| Rc::ptr_eq(&runtime, self)),
             "loaded application belongs to a different ShellRuntime"
         );
+        Ok(())
+    }
+
+    fn claim(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
+        self.check_owner(application)?;
         anyhow::ensure!(
             !application.mounted.replace(true),
             "loaded application has already been mounted"
         );
-        self.instantiate_view_with_policy(
-            &application.view_type,
-            crate::policy::default(),
-            window,
-            cx,
-        )
+        Ok(())
+    }
+
+    fn exported_view_type(&self, loaded: &ViewType, export: &str) -> Result<ViewType> {
+        let namespace = loaded
+            .namespace
+            .clone()
+            .context("the loaded application has no module namespace")?;
+        self.with_js(|ctx| {
+            let namespace = namespace.restore(ctx)?;
+            let value: Value = namespace.get(export)?;
+            let Some(class) = value.as_function().filter(|class| class.is_constructor()) else {
+                return Err(Exception::throw_message(
+                    ctx,
+                    &format!("export `{export}` is missing or is not a View class"),
+                ));
+            };
+            Ok(ViewType {
+                value: Persistent::save(ctx, (**class).clone()),
+                namespace: loaded.namespace.clone(),
+                module_lease: loaded.module_lease.clone(),
+                application: loaded.application.clone(),
+            })
+        })
     }
 
     /// Creates the application's default runtime and makes it available to
@@ -2266,6 +2321,7 @@ impl ShellRuntime {
                 };
                 Ok(ViewType {
                     value: Persistent::save(ctx, class.clone()),
+                    namespace: Some(Persistent::save(ctx, module.namespace()?)),
                     module_lease,
                     application,
                 })
@@ -2508,6 +2564,7 @@ impl ShellRuntime {
                 owner: parent,
                 view_type: ViewType {
                     value: class,
+                    namespace: None,
                     module_lease: provenance.module_lease.clone(),
                     application,
                 },
