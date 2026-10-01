@@ -228,6 +228,38 @@ impl ScriptView {
         !self.retired && self.dirty
     }
 
+    /// The instance field `capturing`, when the script declared it as a boolean.
+    ///
+    /// A missing field, or one that is not a boolean, is false. Reading it does
+    /// not require the view to hold focus.
+    pub fn capturing(&self) -> bool {
+        self.runtime.view_bool(self, "capturing").unwrap_or(false)
+    }
+
+    /// Delivers a key to this view's `on_key_down(event, cx)`.
+    ///
+    /// Focus is not consulted. The payload is the same `KeyEvent` an element
+    /// handler receives. A view with no such method returns an error.
+    pub fn dispatch_key_down(
+        &mut self,
+        keystroke: &gpui::Keystroke,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> anyhow::Result<()> {
+        let object = self.object.clone();
+        let policy = self.policy.clone();
+        self.runtime.clone().dispatch_view_key(
+            &object,
+            policy,
+            cx.entity(),
+            keystroke,
+            is_held,
+            window,
+            cx,
+        )
+    }
+
     /// Makes a retained entity inert before its store handle is removed.
     /// A rendered GPUI frame may still retain the entity after script release.
     pub(crate) fn retire(&mut self) {

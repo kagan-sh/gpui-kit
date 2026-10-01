@@ -4573,19 +4573,8 @@ impl ShellRuntime {
         );
         let result = self.with_js(|ctx| {
             let handler = entry.value.clone().restore(ctx)?;
-            let payload = Object::new(ctx.clone())?;
-            payload.set("key", keystroke.key.as_str())?;
-            payload.set("keystroke", script_keystroke(keystroke))?;
-            match keystroke.key_char.as_deref() {
-                Some(char) => payload.set("key_char", char)?,
-                None => payload.set("key_char", rquickjs::Undefined)?,
-            }
-            if let Some(is_held) = is_held {
-                payload.set("is_held", is_held)?;
-            }
-            payload.set("modifiers", modifiers_object(ctx, keystroke.modifiers)?)?;
             handler.call::<_, ()>((
-                payload,
+                key_event_object(ctx, keystroke, is_held)?,
                 context_object(ctx, ContextBinding::Call(generation))?,
             ))
         });
@@ -4593,6 +4582,56 @@ impl ShellRuntime {
             tracing::error!("error in key handler: {error}");
         }
         scheduler::drain_runtime_jobs(self, window, cx);
+    }
+
+    /// The view instance's own boolean field, or false when it is missing or
+    /// not a boolean.
+    pub(crate) fn view_bool(&self, view: &ScriptView, field: &str) -> Result<bool> {
+        let object = view.object().clone();
+        self.with_js(|ctx| {
+            let instance = object.value.clone().restore(ctx)?;
+            let value: Value = instance.get(field)?;
+            Ok(value.as_bool().unwrap_or(false))
+        })
+    }
+
+    /// Calls `on_key_down(event, cx)` on the view. Focus is not consulted.
+    pub(crate) fn dispatch_view_key(
+        self: &Rc<Self>,
+        object: &ViewObject,
+        policy: Rc<Policy>,
+        view: Entity<ScriptView>,
+        keystroke: &gpui::Keystroke,
+        is_held: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<()> {
+        let (_guard, generation) = scope::enter_with_application(
+            self,
+            window,
+            cx,
+            ScopePhase::Event,
+            Some(view),
+            policy,
+            object.application_generation(),
+        );
+        let result = self.with_js(|ctx| {
+            let instance = object.value.clone().restore(ctx)?;
+            let value: Value = instance.get("on_key_down")?;
+            let Some(handler) = value.as_function().cloned() else {
+                return Err(Exception::throw_message(
+                    ctx,
+                    "view has no on_key_down(event, cx) method",
+                ));
+            };
+            handler.call::<_, ()>((
+                This(instance),
+                key_event_object(ctx, keystroke, Some(is_held))?,
+                context_object(ctx, ContextBinding::Call(generation))?,
+            ))
+        });
+        scheduler::drain_runtime_jobs(self, window, cx);
+        result
     }
 
     /// Controlled-value handlers report intent; the script stores the value and
@@ -9692,6 +9731,25 @@ fn pagination_items<'js>(
 ///
 /// The modifier order is GPUI's own, so a chord that round-trips through
 /// `parse` comes back identical.
+fn key_event_object<'js>(
+    ctx: &Ctx<'js>,
+    keystroke: &gpui::Keystroke,
+    is_held: Option<bool>,
+) -> JsResult<Object<'js>> {
+    let payload = Object::new(ctx.clone())?;
+    payload.set("key", keystroke.key.as_str())?;
+    payload.set("keystroke", script_keystroke(keystroke))?;
+    match keystroke.key_char.as_deref() {
+        Some(char) => payload.set("key_char", char)?,
+        None => payload.set("key_char", rquickjs::Undefined)?,
+    }
+    if let Some(is_held) = is_held {
+        payload.set("is_held", is_held)?;
+    }
+    payload.set("modifiers", modifiers_object(ctx, keystroke.modifiers)?)?;
+    Ok(payload)
+}
+
 fn script_keystroke(keystroke: &gpui::Keystroke) -> String {
     let mut out = String::new();
     if keystroke.modifiers.function {

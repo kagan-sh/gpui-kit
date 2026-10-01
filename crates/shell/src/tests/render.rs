@@ -1830,6 +1830,77 @@ export default class Main { render() { return "main"; } }
     assert!(!crate::policy::default().capabilities().has_write_access());
 }
 
+/// A host can read `capturing` and deliver a key to `on_key_down` while the
+/// view holds no focus. The element focus path is a different door.
+#[gpui::test]
+fn a_view_reports_capturing_and_hears_a_key_without_focus(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let policy = Policy::new()
+        .with_host_module(HostModule::new("keys").function("note", {
+            let seen = seen.clone();
+            move |args| {
+                seen.borrow_mut().push(args.string(0)?.to_owned());
+                Ok(HostValue::from(true))
+            }
+        }))
+        .expect("keys");
+    crate::policy::set_default(policy);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let plate = r#"
+import { note } from "keys";
+export default class Plate {
+  capturing = false;
+  on_key_down(event) {
+    this.capturing = true;
+    note(event.keystroke + "/" + event.key + "/" + event.is_held);
+  }
+  render() { return "plate"; }
+}
+"#;
+    let silent = r#"
+export default class Silent {
+  capturing = "yes";
+  render() { return "silent"; }
+}
+"#;
+    let plate = runtime.load_source("plate", plate).unwrap();
+    let silent = runtime.load_source("silent", silent).unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let plate = context
+        .update(|window, cx| runtime.instantiate_view(&plate, window, cx))
+        .unwrap();
+    let silent = context
+        .update(|window, cx| runtime.instantiate_view(&silent, window, cx))
+        .unwrap();
+    assert!(!context.update(|_, cx| plate.read(cx).capturing()));
+    assert!(!context.update(|_, cx| silent.read(cx).capturing()));
+    context
+        .update(|window, cx| {
+            plate.update(cx, |view, cx| {
+                view.dispatch_key_down(
+                    &gpui::Keystroke::parse("escape").unwrap(),
+                    false,
+                    window,
+                    cx,
+                )
+            })
+        })
+        .unwrap();
+    let missing = context
+        .update(|window, cx| {
+            silent.update(cx, |view, cx| {
+                view.dispatch_key_down(&gpui::Keystroke::parse("a").unwrap(), false, window, cx)
+            })
+        })
+        .expect_err("a view without on_key_down must not pretend to hear the key");
+    crate::policy::set_default(Policy::new());
+    assert!(context.update(|_, cx| plate.read(cx).capturing()));
+    assert_eq!(seen.borrow().as_slice(), ["escape/escape/false"]);
+    assert!(missing.to_string().contains("on_key_down"), "{missing:#}");
+}
+
 #[gpui::test]
 fn registered_parent_can_inspect_and_materialize_a_registered_typed_child(cx: &mut TestAppContext) {
     use crate::{
