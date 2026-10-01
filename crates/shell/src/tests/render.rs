@@ -1830,6 +1830,67 @@ export default class Main { render() { return "main"; } }
     assert!(!crate::policy::default().capabilities().has_write_access());
 }
 
+/// Dropping a named export leaves the default export's generation mounted.
+#[gpui::test]
+fn dropping_a_named_export_leaves_the_generation_mounted(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "gpui-shell-named-export-drop-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        r#"
+export class Side { render() { return "side"; } }
+export default class Main { render() { return "main"; } }
+"#,
+    )
+    .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let application = context
+        .update(|window, cx| {
+            let (_scope, _) = crate::scope::enter_runtime(
+                &runtime,
+                window,
+                cx,
+                crate::scope::ScopePhase::Event,
+                None,
+            );
+            runtime.load_application(&directory, "main.js")
+        })
+        .unwrap();
+    let default_view = context
+        .update(|window, cx| runtime.mount_application(&application, window, cx))
+        .unwrap();
+    let named = context
+        .update(|window, cx| runtime.mount_exported_view(&application, "Side", window, cx))
+        .unwrap();
+    let generation = context.update(|_, cx| {
+        default_view
+            .read(cx)
+            .object()
+            .application_generation()
+            .expect("the default export owns the generation")
+    });
+    context.update(|_, _| drop(named));
+    assert!(
+        generation.is_active(),
+        "dropping a named export must not release the generation"
+    );
+    let again = context
+        .update(|window, cx| runtime.mount_exported_view(&application, "Side", window, cx))
+        .expect("the generation is still mounted");
+    context.update(|_, _| drop(again));
+    assert!(generation.is_active());
+    context.update(|_, _| drop(default_view));
+    assert!(!generation.is_active());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 /// A host can read `capturing` and deliver a key to `on_key_down` while the
 /// view holds no focus. The element focus path is a different door.
 #[gpui::test]

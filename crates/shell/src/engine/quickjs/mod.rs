@@ -1567,13 +1567,15 @@ impl ShellRuntime {
     ///
     /// It shares the default export's namespace, application generation, and
     /// the policy captured when that default export was mounted — not whatever
-    /// [`crate::policy::default`] returns now. The default export must already
-    /// be mounted; otherwise this errors and leaves the handle unconsumed. A
-    /// named export may be mounted any number of times beside the default
-    /// export, which stays single-mount. A missing export, or one that is not
-    /// a class, is an error that leaves the handle unconsumed. As for the
-    /// default export, a construction or initialization failure releases the
-    /// whole application generation.
+    /// [`crate::policy::default`] returns now. The view it returns is not a
+    /// root: only the default export's root releases that generation, so
+    /// dropping a named view leaves the application mounted. The default
+    /// export must already be mounted; otherwise this errors and leaves the
+    /// handle unconsumed. A named export may be mounted any number of times
+    /// beside the default export, which stays single-mount. A missing export,
+    /// or one that is not a class, is an error that leaves the handle
+    /// unconsumed. As for the default export, a construction or initialization
+    /// failure releases the whole application generation.
     pub fn mount_exported_view(
         self: &Rc<Self>,
         application: &LoadedApplication,
@@ -1588,7 +1590,7 @@ impl ShellRuntime {
             .clone()
             .context("the default export has not been mounted")?;
         let view_type = self.exported_view_type(&application.view_type, export)?;
-        self.instantiate_view_with_policy(&view_type, policy, window, cx)
+        self.instantiate_view_owning(&view_type, policy, false, window, cx)
     }
 
     fn check_owner(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
@@ -2404,6 +2406,19 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
+        self.instantiate_view_owning(view_type, policy, true, window, cx)
+    }
+
+    /// `owns_generation` is true for the default export. A named export passes
+    /// false so dropping it cancels only that view's tasks.
+    fn instantiate_view_owning(
+        self: &Rc<Self>,
+        view_type: &ViewType,
+        policy: Rc<crate::policy::Policy>,
+        owns_generation: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<ScriptView>> {
         let application = view_type.application.clone();
         let (construct_scope, _) = scope::enter_with_application(
             self,
@@ -2424,7 +2439,14 @@ impl ShellRuntime {
             }
         };
         drop(construct_scope);
-        let view = cx.new(|_| ScriptView::with_policy(self.clone(), object, policy.clone()));
+        let runtime = self.clone();
+        let view = cx.new(|cx| {
+            if owns_generation {
+                ScriptView::with_policy(runtime, object, policy.clone())
+            } else {
+                ScriptView::shared(runtime, object, policy.clone(), cx.entity_id())
+            }
+        });
         let object = view.read(cx).object().clone();
 
         let (_initialize_scope, _) = scope::enter_with_application(

@@ -90,6 +90,9 @@ pub struct ScriptView {
 enum ViewOwnership {
     /// The application root owns application-wide retained state and tasks.
     Root,
+    /// A named export beside the default root. It shares that generation and
+    /// does not release it.
+    Shared(EntityId),
     /// A nested view owns only work keyed to its exact GPUI entity identity.
     Nested(EntityId),
 }
@@ -107,6 +110,15 @@ impl ScriptView {
         policy: Rc<Policy>,
     ) -> Self {
         Self::with_ownership(runtime, object, policy, ViewOwnership::Root)
+    }
+
+    pub(crate) fn shared(
+        runtime: Rc<ShellRuntime>,
+        object: ViewObject,
+        policy: Rc<Policy>,
+        entity_id: EntityId,
+    ) -> Self {
+        Self::with_ownership(runtime, object, policy, ViewOwnership::Shared(entity_id))
     }
 
     pub(crate) fn nested(
@@ -323,7 +335,7 @@ impl Drop for ScriptView {
                         .release_application_generation_without_context(&application);
                 }
             }
-            ViewOwnership::Nested(entity_id) => {
+            ViewOwnership::Shared(entity_id) | ViewOwnership::Nested(entity_id) => {
                 // Child-owned retained records are removed by EntityStore in
                 // the same operation that removes the child handle. Reaching
                 // back into that RefCell here would re-enter its mutable borrow.
