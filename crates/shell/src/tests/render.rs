@@ -1683,6 +1683,23 @@ export default class Main { render() { return "main"; } }
     };
 
     let application = load(&mut context);
+    let error = context
+        .update(|window, cx| runtime.mount_exported_view(&application, "Side", window, cx))
+        .err()
+        .expect("a named export waits for the default export");
+    assert!(
+        error.to_string().contains("has not been mounted"),
+        "{error:#}"
+    );
+
+    let mount = |context: &mut VisualTestContext, export: &str| {
+        context
+            .update(|window, cx| runtime.mount_exported_view(&application, export, window, cx))
+            .unwrap()
+    };
+    let _default = context
+        .update(|window, cx| runtime.mount_application(&application, window, cx))
+        .unwrap();
     for export in ["missing", "notAView"] {
         let error = context
             .update(|window, cx| runtime.mount_exported_view(&application, export, window, cx))
@@ -1693,15 +1710,6 @@ export default class Main { render() { return "main"; } }
             "{error:#}"
         );
     }
-
-    let mount = |context: &mut VisualTestContext, export: &str| {
-        context
-            .update(|window, cx| runtime.mount_exported_view(&application, export, window, cx))
-            .unwrap()
-    };
-    let _default = context
-        .update(|window, cx| runtime.mount_application(&application, window, cx))
-        .unwrap();
     let views = [
         mount(&mut context, "Side"),
         mount(&mut context, "Other"),
@@ -1731,6 +1739,95 @@ export default class Main { render() { return "main"; } }
     );
 
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// A named export runs under the policy captured when its default export was
+/// mounted, after the host has replaced the global default.
+#[gpui::test]
+fn a_named_export_keeps_the_policy_its_default_export_was_mounted_with(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let seen = Rc::new(RefCell::new(None));
+    let plugin = Policy::new()
+        .with_application("plugin-a")
+        .with_capabilities(Capabilities::new().read_roots([PathBuf::from("/plugin-a")]))
+        .with_host_module(HostModule::new("grant-probe").function("observe", {
+            let seen = seen.clone();
+            move |_| {
+                let policy = crate::scope::policy();
+                *seen.borrow_mut() = Some((
+                    policy.application().to_owned(),
+                    policy.capabilities().has_read_access(),
+                    policy.capabilities().has_write_access(),
+                ));
+                Ok(HostValue::from(true))
+            }
+        }))
+        .expect("grant-probe");
+    crate::policy::set_default(plugin);
+
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "gpui-shell-named-export-policy-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        r#"
+import { observe } from "grant-probe";
+export class Side {
+  init() { observe(); }
+  render() { return "side"; }
+}
+export default class Main { render() { return "main"; } }
+"#,
+    )
+    .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let application = context
+        .update(|window, cx| {
+            let (_scope, _) = crate::scope::enter_runtime(
+                &runtime,
+                window,
+                cx,
+                crate::scope::ScopePhase::Event,
+                None,
+            );
+            runtime.load_application(&directory, "main.js")
+        })
+        .unwrap();
+    let default_view = context
+        .update(|window, cx| runtime.mount_application(&application, window, cx))
+        .unwrap();
+    crate::policy::set_default(
+        Policy::new()
+            .with_application("intruder")
+            .with_capabilities(Capabilities::new().write_roots([PathBuf::from("/intruder")])),
+    );
+    let named = context
+        .update(|window, cx| runtime.mount_exported_view(&application, "Side", window, cx))
+        .unwrap();
+    let (default_policy, named_policy) =
+        context.update(|_, cx| (default_view.read(cx).policy(), named.read(cx).policy()));
+    crate::policy::set_default(Policy::new());
+    let _ = std::fs::remove_dir_all(&directory);
+
+    let (application_name, read, write) =
+        seen.borrow().clone().expect("Side.init ran under a policy");
+    assert_eq!(application_name, "plugin-a");
+    assert!(read, "the named view must keep plugin-a's read grant");
+    assert!(
+        !write,
+        "the named view must not see the intruder's write grant"
+    );
+    assert_eq!(named_policy.application(), "plugin-a");
+    assert!(named_policy.capabilities().has_read_access());
+    assert!(!named_policy.capabilities().has_write_access());
+    assert!(Rc::ptr_eq(&default_policy, &named_policy));
+    assert_eq!(crate::policy::default().application(), "app");
+    assert!(!crate::policy::default().capabilities().has_write_access());
 }
 
 #[gpui::test]

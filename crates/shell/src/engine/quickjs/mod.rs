@@ -893,6 +893,9 @@ pub struct LoadedApplication {
     runtime: Weak<ShellRuntime>,
     view_type: ViewType,
     mounted: Cell<bool>,
+    /// Captured when the default export is claimed. A later named mount reuses
+    /// this handle: the global default may belong to a different plugin by then.
+    mount_policy: RefCell<Option<Rc<crate::policy::Policy>>>,
 }
 
 impl ViewType {
@@ -1540,6 +1543,7 @@ impl ShellRuntime {
             runtime: Rc::downgrade(self),
             view_type: self.load_app(directory, entry)?,
             mounted: Cell::new(false),
+            mount_policy: RefCell::new(None),
         })
     }
 
@@ -1547,26 +1551,25 @@ impl ShellRuntime {
     ///
     /// The owner consumes the handle before construction. This makes a failed
     /// attempt terminal too, matching the application-generation cleanup that
-    /// construction and initialization failures perform.
+    /// construction and initialization failures perform. The policy in force
+    /// here is the one named mounts reuse.
     pub fn mount_application(
         self: &Rc<Self>,
         application: &LoadedApplication,
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
-        self.claim(application)?;
-        self.instantiate_view_with_policy(
-            &application.view_type,
-            crate::policy::default(),
-            window,
-            cx,
-        )
+        let policy = self.claim(application)?;
+        self.instantiate_view_with_policy(&application.view_type, policy, window, cx)
     }
 
     /// Mounts a named exported view class of a loaded application.
     ///
-    /// It shares the default export's namespace, policy and application
-    /// generation, and may be mounted any number of times beside the default
+    /// It shares the default export's namespace, application generation, and
+    /// the policy captured when that default export was mounted — not whatever
+    /// [`crate::policy::default`] returns now. The default export must already
+    /// be mounted; otherwise this errors and leaves the handle unconsumed. A
+    /// named export may be mounted any number of times beside the default
     /// export, which stays single-mount. A missing export, or one that is not
     /// a class, is an error that leaves the handle unconsumed. As for the
     /// default export, a construction or initialization failure releases the
@@ -1579,8 +1582,13 @@ impl ShellRuntime {
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
         self.check_owner(application)?;
+        let policy = application
+            .mount_policy
+            .borrow()
+            .clone()
+            .context("the default export has not been mounted")?;
         let view_type = self.exported_view_type(&application.view_type, export)?;
-        self.instantiate_view_with_policy(&view_type, crate::policy::default(), window, cx)
+        self.instantiate_view_with_policy(&view_type, policy, window, cx)
     }
 
     fn check_owner(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
@@ -1594,13 +1602,18 @@ impl ShellRuntime {
         Ok(())
     }
 
-    fn claim(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
+    fn claim(
+        self: &Rc<Self>,
+        application: &LoadedApplication,
+    ) -> Result<Rc<crate::policy::Policy>> {
         self.check_owner(application)?;
         anyhow::ensure!(
             !application.mounted.replace(true),
             "loaded application has already been mounted"
         );
-        Ok(())
+        let policy = crate::policy::default();
+        *application.mount_policy.borrow_mut() = Some(policy.clone());
+        Ok(policy)
     }
 
     fn exported_view_type(&self, loaded: &ViewType, export: &str) -> Result<ViewType> {
