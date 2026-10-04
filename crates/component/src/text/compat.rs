@@ -204,6 +204,13 @@ impl TextView {
         self.inner = self.inner.markdown_mdx();
         self
     }
+    /// Render a soft line break inside a paragraph as a line break.
+    ///
+    /// See [`MarkdownExtensions::breaks`].
+    pub fn markdown_breaks(mut self) -> Self {
+        self.inner = self.inner.markdown_breaks();
+        self
+    }
 
     /// Parses custom block nodes out of the Markdown AST.
     pub fn markdown_block_parser<F>(mut self, parser: F) -> Self

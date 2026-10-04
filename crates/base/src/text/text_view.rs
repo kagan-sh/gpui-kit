@@ -487,6 +487,15 @@ impl TextView {
         self
     }
 
+    /// Render a soft line break inside a paragraph as a line break.
+    ///
+    /// See [`MarkdownExtensions::breaks`].
+    pub fn markdown_breaks(mut self) -> Self {
+        let extensions = Arc::make_mut(&mut self.markdown_extensions);
+        *extensions = extensions.clone().breaks();
+        self
+    }
+
     /// Register a custom block-level Markdown parser.
     ///
     /// The parser runs during Markdown AST conversion and must be independent

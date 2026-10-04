@@ -779,14 +779,20 @@ fn parse_paragraph(
             // line ending. The renderer treats a newline in a text run as a
             // line break, so a paragraph hard-wrapped in the source would
             // render one visual line per source line instead of reflowing to
-            // the available width. Collapse soft breaks to spaces; *hard*
-            // breaks never reach here, they arrive as their own Node::Break.
+            // the available width. Collapse soft breaks to spaces unless the
+            // caller asked to keep them. *Hard* breaks never reach here, they
+            // arrive as their own Node::Break. Code never reaches here either.
             //
             // mdast hands the line ending over exactly as the source wrote it,
             // so a CRLF document still carries its carriage return here. Take
             // the CR with the newline: dropping only the newline would strand
-            // the CR in the middle of the reflowed line.
-            text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
+            // the CR in the middle of the reflowed line. A kept break is one
+            // `\n`, so the carriage return does not land in the run either.
+            text = if cx.markdown_extensions.has_breaks() {
+                val.value.replace("\r\n", "\n").replace('\r', "\n")
+            } else {
+                val.value.replace("\r\n", " ").replace(['\n', '\r'], " ")
+            };
             paragraph.push(mapped_inline(source, text.clone(), node, cx))
         }
         Node::Emphasis(val) => {
@@ -2202,6 +2208,87 @@ mod tests {
             .map(|child| child.text.as_ref())
             .collect();
         assert_eq!(texts, ["a b", "\n", "c"]);
+    }
+
+    /// [`MarkdownExtensions::breaks`] keeps a soft break as a line ending.
+    /// Fenced and indented code are other nodes, so the option leaves them.
+    #[test]
+    fn test_soft_break_renders_as_line_break_when_breaks_enabled() {
+        fn paragraph_text(source: &str) -> String {
+            let mut cx = NodeContext {
+                markdown_extensions: Arc::new(MarkdownExtensions::default().breaks()),
+                ..Default::default()
+            };
+            let document = parse(source, &mut cx).unwrap();
+            let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+                panic!("expected paragraph");
+            };
+            paragraph.children[0].text.to_string()
+        }
+
+        for source in ["1\n2\n3", "1\r\n2\r\n3", "1\r2\r3"] {
+            assert_eq!(paragraph_text(source), "1\n2\n3", "source: {source:?}");
+        }
+
+        fn code_text(source: &str, breaks: bool) -> String {
+            let extensions = if breaks {
+                MarkdownExtensions::default().breaks()
+            } else {
+                MarkdownExtensions::default()
+            };
+            let mut cx = NodeContext {
+                markdown_extensions: Arc::new(extensions),
+                ..Default::default()
+            };
+            let document = parse(source, &mut cx).unwrap();
+            document
+                .blocks
+                .iter()
+                .find_map(first_code_block)
+                .expect("expected code block")
+                .code()
+                .to_string()
+        }
+
+        for source in ["```\n1\n2\n3\n```", "    1\n    2\n"] {
+            let kept = code_text(source, true);
+            assert_eq!(kept, code_text(source, false), "source: {source:?}");
+            assert!(kept.contains('\n'), "source: {source:?}");
+        }
+
+        let mut cx = NodeContext {
+            markdown_extensions: Arc::new(MarkdownExtensions::default().breaks()),
+            ..Default::default()
+        };
+        let document = parse("a\nb  \nc", &mut cx).unwrap();
+        let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
+            panic!("expected paragraph");
+        };
+        let texts: Vec<_> = paragraph
+            .children
+            .iter()
+            .map(|child| child.text.as_ref())
+            .collect();
+        assert_eq!(texts, ["a\nb", "\n", "c"]);
+
+        let mut cx = NodeContext {
+            markdown_extensions: Arc::new(MarkdownExtensions::default().breaks()),
+            ..Default::default()
+        };
+        let source = "1\n2\n3";
+        let document = parse(source, &mut cx).unwrap();
+        let paragraph = document
+            .blocks
+            .iter()
+            .find_map(first_paragraph)
+            .expect("expected paragraph");
+        let rendered = paragraph.text();
+        assert_eq!(rendered, "1\n2\n3");
+        let mut state = paragraph.state.lock().unwrap();
+        state.set_text(rendered.into());
+        state.selection = Some((2..3).into());
+        drop(state);
+        assert_eq!(document.selected_source_range(), Some(2..3));
     }
 
     /// A CommonMark hard break — two trailing spaces or a trailing backslash —

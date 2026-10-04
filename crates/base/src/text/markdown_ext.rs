@@ -246,6 +246,7 @@ impl PartialEq for MarkdownNode {
 pub struct MarkdownExtensions {
     enable_mdx: bool,
     enable_frontmatter: bool,
+    breaks: bool,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     inline_parsers: Vec<Arc<MarkdownInlineParserFn>>,
@@ -283,6 +284,22 @@ impl MarkdownExtensions {
         self.enable_mdx = true;
         self.bump_revision();
         self
+    }
+
+    /// Render a soft line break inside a paragraph as a line break.
+    ///
+    /// A soft break is a single line ending in a paragraph. It draws as a
+    /// space, so wrapped prose fills the width. With this on, that ending
+    /// stays a line break. Fenced code, indented code, and inline code are
+    /// other nodes, so their line breaks stay as written.
+    pub fn breaks(mut self) -> Self {
+        self.breaks = true;
+        self.bump_revision();
+        self
+    }
+
+    pub(crate) fn has_breaks(&self) -> bool {
+        self.breaks
     }
 
     /// Register a parser for block-level Markdown AST nodes.
@@ -352,6 +369,7 @@ impl MarkdownExtensions {
         self.parser_revision == other.parser_revision
             && self.enable_mdx == other.enable_mdx
             && self.enable_frontmatter == other.enable_frontmatter
+            && self.breaks == other.breaks
             && self.block_parsers.len() == other.block_parsers.len()
             && self.block_renderers.len() == other.block_renderers.len()
             && self.inline_parsers.len() == other.inline_parsers.len()
