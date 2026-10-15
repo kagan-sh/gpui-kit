@@ -9661,6 +9661,11 @@ pub(crate) enum ContextBinding {
     /// Whichever host call is running now. Survives an `await`, because it
     /// names no frame that could go stale — the mirror of GPUI's `AsyncApp`.
     Ambient,
+    /// The `cx` a spawned task or timer handler receives: ambient for the host
+    /// call, but it speaks for the view that owns the task. A continuation can
+    /// be resumed from another task's job-queue drain, through a promise the two
+    /// share, and the ambient view is then that other task's.
+    Task(u64),
 }
 
 impl ContextBinding {
@@ -9669,12 +9674,20 @@ impl ContextBinding {
         self.with_app(ctx, |_| ())
     }
 
+    /// The view this `cx` speaks for.
+    fn view(self) -> Option<Entity<ScriptView>> {
+        match self {
+            Self::Task(id) => scheduler::task_owner(id).or_else(scope::current_view),
+            Self::Call(_) | Self::Ambient => scope::current_view(),
+        }
+    }
+
     /// The `App` of the call this `cx` speaks for.
     fn with_app<R>(self, ctx: &Ctx<'_>, body: impl FnOnce(&mut App) -> R) -> JsResult<R> {
         match self {
             Self::Call(generation) => scope::with_context(generation, |_, app| body(app))
                 .map_err(|error| js_error::type_error(ctx, &error.to_string())),
-            Self::Ambient => scope::with_current_app(body).ok_or_else(|| {
+            Self::Ambient | Self::Task(_) => scope::with_current_app(body).ok_or_else(|| {
                 js_error::type_error(
                     ctx,
                     "this cx has no host call to speak for. An async cx works inside the task \
@@ -9923,7 +9936,7 @@ fn context_object<'js>(ctx: &Ctx<'js>, binding: ContextBinding) -> JsResult<Obje
                     ));
                 }
 
-                let current = scope::current_view();
+                let current = binding.view();
                 let target = match target.0 {
                     None => None,
                     Some(value) if value.is_undefined() => None,
