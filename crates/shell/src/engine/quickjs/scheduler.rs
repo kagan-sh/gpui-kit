@@ -561,7 +561,7 @@ fn js_spawn<'js>(
     // An async `cx`, always — including at module top level, where the old
     // call-scoped one had to be omitted and the body was handed `undefined`.
     // It names no frame, so there is nothing to be absent.
-    let started = body.call::<_, Value>((context_object(&ctx, ContextBinding::Ambient)?,));
+    let started = body.call::<_, Value>((context_object(&ctx, ContextBinding::Task(task.id))?,));
 
     match started {
         Ok(value) => match value.into_promise() {
@@ -643,6 +643,7 @@ fn schedule<'js>(
     )?;
 
     let ticking = task.clone();
+    let task_id = task.id;
     host.foreground
         .clone()
         .spawn(async move {
@@ -669,7 +670,7 @@ fn schedule<'js>(
                     move |ctx, _generation| {
                         callback
                             .restore(ctx)?
-                            .call::<_, ()>((context_object(ctx, ContextBinding::Ambient)?,))
+                            .call::<_, ()>((context_object(ctx, ContextBinding::Task(task_id))?,))
                     },
                 );
 
@@ -1399,6 +1400,11 @@ where
 
 const MAX_OUTSTANDING_TASKS_PER_RUNTIME: usize = 1024;
 
+/// The view that owns a live task, if it has one and it is still alive.
+pub(super) fn task_owner(id: TaskId) -> Option<Entity<ScriptView>> {
+    TASKS.with_borrow(|tasks| tasks.get(&id)?.owner.as_ref()?.upgrade())
+}
+
 fn register<'js>(ctx: &Ctx<'js>, task: TaskState) -> JsResult<Rc<TaskState>> {
     try_register(task).map_err(|message| Exception::throw_range(ctx, &message))
 }
@@ -1938,6 +1944,33 @@ mod tests {
             .expect("read marker");
         assert!(!ran, "a cancelled policy resumed its queued promise job");
 
+        std::mem::forget(runtime);
+    }
+
+    /// A task's `cx` speaks for the view that owns the task, not for whichever
+    /// view's job-queue drain happens to resume it. Two views share a promise;
+    /// the second view's drain runs the first's continuation, and its
+    /// `cx.notify()` must still reach the first.
+    #[gpui::test]
+    async fn a_task_cx_names_the_view_that_owns_the_task(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+
+        let runtime = ShellRuntime::new_isolated().expect("runtime");
+        let object = || {
+            runtime.context.with(|ctx| {
+                ViewObject::unscoped(Persistent::save(
+                    &ctx,
+                    Object::new(ctx.clone()).expect("object"),
+                ))
+            })
+        };
+        let owner = cx.update(|cx| cx.new(|_| ScriptView::new(runtime.clone(), object())));
+        let task = register_unchecked(TaskState::new("test", Some(owner.downgrade()), None));
+
+        let named = super::super::ContextBinding::Task(task.id).view();
+        assert_eq!(named.map(|view| view.entity_id()), Some(owner.entity_id()));
+
+        finish(&task);
         std::mem::forget(runtime);
     }
 
