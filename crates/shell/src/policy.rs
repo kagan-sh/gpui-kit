@@ -106,6 +106,8 @@ pub struct Policy {
     /// process. Shared across copies of a policy for the same reason the other
     /// two are: one application, one storage.
     session: Rc<RefCell<Option<Storage>>>,
+    /// A view under this policy may only paint. See [`crate::paint_only`].
+    paint_only: bool,
 }
 
 impl Default for Policy {
@@ -124,6 +126,7 @@ impl Policy {
             modules: Rc::new(RefCell::new(Rc::new(HostModules::default()))),
             store: Rc::new(RefCell::new(None)),
             session: Rc::new(RefCell::new(Some(Storage::in_memory()))),
+            paint_only: false,
         }
     }
 
@@ -217,6 +220,20 @@ impl Policy {
         &self.capabilities
     }
 
+    /// Whether a view under this policy may only paint: no handlers, no focus,
+    /// no popups and no window access. See [`crate::paint_only`].
+    pub fn is_paint_only(&self) -> bool {
+        self.paint_only
+    }
+
+    /// The same authority, narrowed to painting.
+    pub(crate) fn painting_only(&self) -> Self {
+        Self {
+            paint_only: true,
+            ..self.duplicate()
+        }
+    }
+
     pub(crate) fn modules(&self) -> Rc<HostModules> {
         // Cloned out rather than borrowed across the call: dispatching into a
         // module may register modules again, and the borrow would still be open.
@@ -291,6 +308,7 @@ impl Policy {
             modules: self.modules.clone(),
             store: self.store.clone(),
             session: self.session.clone(),
+            paint_only: self.paint_only,
         }
     }
 }

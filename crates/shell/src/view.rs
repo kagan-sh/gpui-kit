@@ -75,6 +75,8 @@ pub struct ScriptView {
     /// the same surface as a render failure. Takes precedence over `error`,
     /// which describes code the author has already edited away.
     reload_error: Option<String>,
+    /// Set once a paint-only view breaks its rule. It stays failed.
+    refusal: Option<String>,
     /// Whose authority this view's script runs under.
     ///
     /// Captured when the view is constructed rather than read when it is used:
@@ -146,6 +148,7 @@ impl ScriptView {
             theme: None,
             error: None,
             reload_error: None,
+            refusal: None,
             ownership,
             runtime,
         }
@@ -283,6 +286,16 @@ impl ScriptView {
         self.current = None;
     }
 
+    /// Fails a paint-only view for good. It paints nothing from here on, and
+    /// [`Self::build_error`] says why.
+    pub(crate) fn refuse(&mut self, reason: String) {
+        self.dirty = false;
+        self.previous = None;
+        self.current = None;
+        self.error = Some(reason.clone());
+        self.refusal = Some(reason);
+    }
+
     /// Runs the script and publishes what it produced.
     ///
     /// The build is transactional. A replacement snapshot is assembled beside
@@ -295,13 +308,24 @@ impl ScriptView {
         // survive into the next frame rather than be wiped by the build that
         // was already in flight.
         self.dirty = false;
+        if self.refusal.is_some() {
+            return;
+        }
 
         let runtime = self.runtime.clone();
         let object = self.object.clone();
         let policy = self.policy.clone();
         let entity = cx.entity();
 
-        match runtime.build_snapshot(&object, Some(entity), policy, window, cx) {
+        let built = runtime.build_snapshot(&object, Some(entity), policy, window, cx);
+        if let Ok(snapshot) = &built
+            && self.policy.is_paint_only()
+            && let Some(reason) = crate::paint_only::refusal(snapshot)
+        {
+            self.refuse(reason);
+            return;
+        }
+        match built {
             Ok(snapshot) => {
                 // Measured here rather than anywhere else because this is the
                 // only place two consecutive descriptions of one view exist at
