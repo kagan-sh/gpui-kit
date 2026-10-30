@@ -345,9 +345,9 @@ fn with_root<R>(
     else {
         return Err(Exception::throw_type(
             ctx,
-            &format!(
+            &crate::paint_only::or(format!(
                 "{api} needs a live host call; call it from init(), an event handler or a task"
-            ),
+            )),
         ));
     };
 

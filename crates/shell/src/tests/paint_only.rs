@@ -187,5 +187,5 @@ fn a_paint_only_view_cannot_hold_input_state(cx: &mut TestAppContext) {
         Err(error) => error.to_string(),
         Ok(view) => error(&view, &mut context).unwrap_or_default(),
     };
-    assert!(!refused.is_empty(), "an input state was created");
+    assert!(refused.contains("paint-only"), "{refused}");
 }

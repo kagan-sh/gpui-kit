@@ -23,6 +23,16 @@ use crate::{
 pub(crate) const WINDOW: &str = "a paint-only view cannot use the window: no focus, dialogs, \
      sheets, notifications, key bindings, window changes, window reads or input state";
 
+/// The message for a refused window call: [`WINDOW`] when the call came from a
+/// paint-only view, so its author reads the rule rather than a timing hint.
+pub(crate) fn or(message: String) -> String {
+    if crate::scope::current_policy().is_some_and(|policy| policy.is_paint_only()) {
+        WINDOW.to_owned()
+    } else {
+        message
+    }
+}
+
 /// The first thing in `snapshot` a paint-only view may not describe, worded for
 /// the plugin's author.
 pub(crate) fn refusal(snapshot: &RenderSnapshot) -> Option<String> {
