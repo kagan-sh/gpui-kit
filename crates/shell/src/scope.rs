@@ -345,12 +345,34 @@ pub fn with_current_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 /// the host, so the context comes from the scope stack rather than being
 /// threaded through. Returns `None` outside any scope, which is the honest
 /// answer for "the script asked for this from nowhere".
+///
+/// A paint-only view gets `None` too, and fails for good: everything reached
+/// through here changes or reads the window, and a view that may only paint
+/// has no business with it. See [`crate::paint_only`].
 pub fn with_current<R>(f: impl FnOnce(&mut Window, &mut App) -> R) -> Option<R> {
-    let pointers =
-        STACK.with(|stack| stack.borrow().last().map(|frame| (frame.window, frame.app)))?;
+    let (window, app, paint_only) = STACK.with(|stack| {
+        stack.borrow().last().map(|frame| {
+            let paint_only = frame.policy.is_paint_only().then(|| frame.view.clone());
+            (frame.window, frame.app, paint_only)
+        })
+    })?;
     let _borrow = HostContextBorrow::acquire()?;
+    if let Some(view) = paint_only {
+        if let Some(view) = view {
+            // SAFETY: see the module header.
+            let app = unsafe { &mut *app };
+            // Deferred: the view may be the one rendering right now.
+            app.defer(move |cx| {
+                view.update(cx, |view, cx| {
+                    view.refuse(crate::paint_only::WINDOW.to_owned());
+                    cx.notify();
+                });
+            });
+        }
+        return None;
+    }
     // SAFETY: see the module header.
-    Some(f(unsafe { &mut *pointers.0 }, unsafe { &mut *pointers.1 }))
+    Some(f(unsafe { &mut *window }, unsafe { &mut *app }))
 }
 
 /// The policy the innermost scope runs under, if there is one.

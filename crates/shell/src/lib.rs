@@ -72,6 +72,7 @@ pub mod host;
 pub mod host_modules;
 pub(crate) mod materialize;
 pub mod metrics;
+pub(crate) mod paint_only;
 pub(crate) mod path;
 pub mod plugin;
 pub mod policy;

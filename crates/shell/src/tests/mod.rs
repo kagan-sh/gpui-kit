@@ -12,6 +12,7 @@ mod fs;
 mod host_api;
 mod http_request;
 mod network;
+mod paint_only;
 mod process;
 mod render;
 mod snapshot;

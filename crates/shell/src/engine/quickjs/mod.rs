@@ -1587,6 +1587,32 @@ impl ShellRuntime {
         self.instantiate_view_owning(&view_type, policy, false, window, cx)
     }
 
+    /// Mounts a named exported view that may only paint, as
+    /// [`Self::mount_exported_view`] does otherwise.
+    ///
+    /// Its description may hold boxes, text, images, svgs and paths with their
+    /// styles and motion, and nothing that takes input, focus or a later paint
+    /// pass. Its code may not reach the window. The first breach makes the view
+    /// fail for good with a [`ScriptView::build_error`] naming it, and the view
+    /// paints nothing. See [`crate::paint_only`].
+    pub fn mount_paint_only_view(
+        self: &Rc<Self>,
+        application: &LoadedApplication,
+        export: &str,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<Entity<ScriptView>> {
+        self.check_owner(application)?;
+        let policy = application
+            .mount_policy
+            .borrow()
+            .as_ref()
+            .map(|policy| Rc::new(policy.painting_only()))
+            .context("the default export has not been mounted")?;
+        let view_type = self.exported_view_type(&application.view_type, export)?;
+        self.instantiate_view_owning(&view_type, policy, false, window, cx)
+    }
+
     fn check_owner(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {
         anyhow::ensure!(
             application
