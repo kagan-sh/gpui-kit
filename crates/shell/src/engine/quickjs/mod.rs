@@ -4644,6 +4644,7 @@ impl ShellRuntime {
     }
 
     /// Calls `on_key_down(event, cx)` on the view. Focus is not consulted.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn dispatch_view_key(
         self: &Rc<Self>,
         object: &ViewObject,
