@@ -279,3 +279,28 @@ fn a_view_that_turns_bad_later_is_refused_before_that_frame(cx: &mut TestAppCont
         "the bad frame was never refused"
     );
 }
+
+#[gpui::test]
+fn a_paint_only_view_takes_no_keys_even_when_sent_one(cx: &mut TestAppContext) {
+    let (view, mut context) = mount(cx, DRAWING, paint_only());
+    let delivered = context.update(|window, cx| {
+        let key = gpui::Keystroke::parse("a").expect("a key");
+        view.update(cx, |view, cx| {
+            view.dispatch_key_down(&key, false, window, cx)
+        })
+    });
+    let error = delivered.expect_err("the key was delivered");
+    assert!(error.to_string().contains("paint-only"), "{error}");
+}
+
+#[gpui::test]
+fn a_failed_reload_counts_as_a_build_error(cx: &mut TestAppContext) {
+    let (view, mut context) = mount(cx, DRAWING, paint_only());
+    assert_eq!(error(&view, &mut context), None);
+    context.update(|_, cx| {
+        view.update(cx, |view, cx| {
+            view.set_reload_error(Some("reload broke".to_owned()), cx);
+        });
+    });
+    assert_eq!(error(&view, &mut context).as_deref(), Some("reload broke"));
+}

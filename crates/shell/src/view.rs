@@ -209,14 +209,15 @@ impl ScriptView {
     }
 
     /// The published description, if one has been built.
-    /// Why the most recent build failed, if it did.
+    /// Why the most recent source reload or build failed, if one did. A reload
+    /// failure comes first, as the view draws it.
     ///
     /// A view with no snapshot is not the same as a view with nothing to draw:
     /// it means the script threw and the failure was recorded here. A test that
     /// finds `snapshot()` empty should report this rather than the absence,
     /// because the absence is the symptom and this is the cause.
     pub fn build_error(&self) -> Option<&str> {
-        self.error.as_deref()
+        self.reload_error.as_deref().or(self.error.as_deref())
     }
 
     pub fn snapshot(&self) -> Option<&RenderSnapshot> {
@@ -262,6 +263,10 @@ impl ScriptView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            !self.policy.is_paint_only(),
+            "a paint-only view takes no keys"
+        );
         let object = self.object.clone();
         let policy = self.policy.clone();
         self.runtime.clone().dispatch_view_key(

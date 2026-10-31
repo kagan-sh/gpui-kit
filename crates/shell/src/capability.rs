@@ -35,6 +35,8 @@ pub struct Capabilities {
     clipboard_write: bool,
     exit: bool,
     env_variables: Vec<String>,
+    /// The host's own defaults, replacing [`default_env_variables`].
+    default_env: Option<Vec<String>>,
 }
 
 /// Environment variables every application sees without asking.
@@ -292,6 +294,15 @@ impl Capabilities {
         self
     }
 
+    /// Replaces [`default_env_variables`], the names every script sees
+    /// without asking, with the host's own list. An empty list shows nothing
+    /// but the granted names: a host whose plugins must ask for each variable
+    /// passes one.
+    pub fn default_env_variables(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.default_env = Some(names.into_iter().collect());
+        self
+    }
+
     /// Whether `process.env` may show `name`: one of the defaults or a
     /// granted name, compared without regard to case.
     ///
@@ -300,9 +311,12 @@ impl Capabilities {
     /// Windows does not distinguish them at all. One spelling in the list or
     /// the manifest covers every one the environment uses.
     pub(crate) fn may_show_env_variable(&self, name: &str) -> bool {
-        default_env_variables()
-            .iter()
-            .copied()
+        let defaults: Vec<&str> = match &self.default_env {
+            Some(names) => names.iter().map(String::as_str).collect(),
+            None => default_env_variables().to_vec(),
+        };
+        defaults
+            .into_iter()
             .chain(self.env_variables.iter().map(String::as_str))
             .any(|visible| visible.eq_ignore_ascii_case(name))
     }
@@ -1133,5 +1147,27 @@ mod symlink_tests {
         assert!(capabilities.may_show_env_variable("http_proxy"));
         assert!(capabilities.may_show_env_variable("MY_APP_MODE"));
         assert!(!capabilities.may_show_env_variable("GITHUB_TOKEN"));
+    }
+
+    #[test]
+    fn a_host_can_replace_the_default_environment() {
+        let capabilities = Capabilities::new()
+            .default_env_variables([])
+            .env_variables(["EDITOR".to_owned()]);
+        for hidden in [
+            "HTTPS_PROXY",
+            "https_proxy",
+            "PATH",
+            "HOME",
+            "USER",
+            "HOSTNAME",
+            "SHELL",
+        ] {
+            assert!(!capabilities.may_show_env_variable(hidden), "{hidden}");
+        }
+        assert!(capabilities.may_show_env_variable("EDITOR"));
+        let own = Capabilities::new().default_env_variables(["LANG".to_owned()]);
+        assert!(own.may_show_env_variable("lang"));
+        assert!(!own.may_show_env_variable("HOME"));
     }
 }
