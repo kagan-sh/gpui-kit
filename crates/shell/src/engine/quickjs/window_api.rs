@@ -336,7 +336,7 @@ fn read<R>(ctx: &Ctx<'_>, api: &str, body: impl FnOnce(&Window) -> R) -> JsResul
     scope::with_current(|window, _| body(window)).ok_or_else(|| {
         js_error::type_error(
             ctx,
-            &crate::paint_only::or(format!(
+            &crate::paint_only::window_refusal_or(format!(
                 "{api} needs a live host call; call it from render(), init(), \
                  an event handler or a task"
             )),
@@ -361,7 +361,7 @@ fn write(ctx: &Ctx<'_>, api: &str, body: impl FnOnce(&mut Window, &mut gpui::App
     scope::with_current(|window, app| body(window, app)).ok_or_else(|| {
         js_error::type_error(
             ctx,
-            &crate::paint_only::or(format!(
+            &crate::paint_only::window_refusal_or(format!(
                 "{api} needs a live host call; call it from an event handler or a task"
             )),
         )

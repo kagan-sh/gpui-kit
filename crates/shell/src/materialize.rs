@@ -1453,7 +1453,9 @@ fn materialize_component(
         Component::AvatarFallback => components::avatar::orphan("AvatarFallback"),
         Component::Image(path) => {
             warn_unhonoured_a11y(&behavior, "image", &[]);
-            let mut image = gpui::img(SharedString::from(path));
+            let mut image = gpui::img(gpui::ImageSource::Resource(gpui::Resource::Embedded(
+                SharedString::from(path),
+            )));
             image.style().refine(&refinement);
             image.into_any_element()
         }

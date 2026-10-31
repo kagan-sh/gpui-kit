@@ -76,6 +76,35 @@ impl AppAssets {
     }
 }
 
+/// Refuses an image source that would not load from the application root: a
+/// URL of any scheme (GPUI fetches those with the app's HTTP client), an
+/// absolute path, or one that climbs out with `..`.
+pub(crate) fn check_local(path: &str) -> Result<(), String> {
+    let escapes = std::path::Path::new(path).components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::ParentDir
+                | std::path::Component::RootDir
+                | std::path::Component::Prefix(_)
+        )
+    });
+    // What `url::Url::parse` accepts, and so what GPUI would fetch, always opens
+    // with a scheme: a letter, then letters, digits, `+`, `-` or `.`, then `:`.
+    let scheme = path.split_once(':').is_some_and(|(scheme, _)| {
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+    });
+    if path.is_empty() || scheme || escapes {
+        return Err(format!(
+            "image {path:?} must be a relative path inside the application's folder; \
+             URLs and paths that leave the folder are refused"
+        ));
+    }
+    Ok(())
+}
+
 impl AssetSource for AppAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let Some((dir, resolved)) = self.resolve(path) else {

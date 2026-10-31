@@ -286,9 +286,13 @@ impl ScriptView {
         self.current = None;
     }
 
-    /// Fails a paint-only view for good. It paints nothing from here on, and
-    /// [`Self::build_error`] says why.
-    pub(crate) fn refuse(&mut self, reason: String) {
+    /// Fails a paint-only view for good. It paints nothing from here on,
+    /// [`Self::build_error`] says why, and its timers and tasks stop.
+    pub(crate) fn refuse(&mut self, reason: String, cx: &mut Context<Self>) {
+        // Deferred: this may run inside the view's own build, while the
+        // scheduler is busy with the task that asked.
+        let (runtime, id) = (self.runtime.clone(), cx.entity_id());
+        cx.defer(move |_| crate::engine::quickjs::cancel_view_tasks(&runtime, id));
         self.dirty = false;
         self.previous = None;
         self.current = None;
@@ -322,7 +326,7 @@ impl ScriptView {
             && self.policy.is_paint_only()
             && let Some(reason) = crate::paint_only::refusal(snapshot)
         {
-            self.refuse(reason);
+            self.refuse(reason, cx);
             return;
         }
         match built {

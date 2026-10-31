@@ -132,7 +132,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 .ok_or_else(|| {
                     js_error::type_error(
                         &ctx,
-                        &crate::paint_only::or(String::from(
+                        &crate::paint_only::window_refusal_or(String::from(
                             "InputState.new(...) needs a live host call; call it from init() \
                          or an event handler",
                         )),
@@ -284,7 +284,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 .ok_or_else(|| {
                     js_error::type_error(
                         &ctx,
-                        &crate::paint_only::or(String::from(
+                        &crate::paint_only::window_refusal_or(String::from(
                             "TextareaState.new(...) needs a live host call; call it from init() \
                          or an event handler",
                         )),
@@ -496,7 +496,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 .ok_or_else(|| {
                     js_error::type_error(
                         &ctx,
-                        &crate::paint_only::or(String::from(
+                        &crate::paint_only::window_refusal_or(String::from(
                             "SliderState.new(...) needs a live host call; call it from init() \
                          or an event handler",
                         )),
@@ -600,7 +600,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
             .ok_or_else(|| {
                 js_error::type_error(
                     &ctx,
-                    &crate::paint_only::or(String::from(
+                    &crate::paint_only::window_refusal_or(String::from(
                         "CalendarState.new() needs a live host call; call it from init() or an \
                      event handler",
                     )),
@@ -843,7 +843,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 .ok_or_else(|| {
                     js_error::type_error(
                         &ctx,
-                        &crate::paint_only::or(String::from(
+                        &crate::paint_only::window_refusal_or(String::from(
                             "OtpState.new(...) needs a live host call; call it from init() \
                          or an event handler",
                         )),
@@ -1768,7 +1768,7 @@ fn alive(ctx: &Ctx<'_>, runtime: &Weak<ShellRuntime>) -> JsResult<std::rc::Rc<Sh
 fn needs_call(ctx: &Ctx<'_>, what: &str) -> rquickjs::Error {
     js_error::type_error(
         ctx,
-        &crate::paint_only::or(format!(
+        &crate::paint_only::window_refusal_or(format!(
             "{what} needs a live host call; call it from render or an event handler"
         )),
     )
