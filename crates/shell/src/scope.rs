@@ -350,21 +350,25 @@ pub fn with_current_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 /// through here changes or reads the window, and a view that may only paint
 /// has no business with it. See [`crate::paint_only`].
 pub fn with_current<R>(f: impl FnOnce(&mut Window, &mut App) -> R) -> Option<R> {
-    let (window, app, paint_only) = STACK.with(|stack| {
+    let (window, app, paint_only, view) = STACK.with(|stack| {
         stack.borrow().last().map(|frame| {
-            let paint_only = frame.policy.is_paint_only().then(|| frame.view.clone());
-            (frame.window, frame.app, paint_only)
+            (
+                frame.window,
+                frame.app,
+                frame.policy.is_paint_only(),
+                frame.view.clone(),
+            )
         })
     })?;
     let _borrow = HostContextBorrow::acquire()?;
-    if let Some(view) = paint_only {
+    if paint_only {
+        // SAFETY: see the module header.
+        let app = unsafe { &mut *app };
         if let Some(view) = view {
-            // SAFETY: see the module header.
-            let app = unsafe { &mut *app };
             // Deferred: the view may be the one rendering right now.
             app.defer(move |cx| {
                 view.update(cx, |view, cx| {
-                    view.refuse(crate::paint_only::WINDOW.to_owned());
+                    view.refuse(crate::paint_only::WINDOW.to_owned(), cx);
                     cx.notify();
                 });
             });

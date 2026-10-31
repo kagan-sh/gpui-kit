@@ -7315,7 +7315,7 @@ impl ShellRuntime {
                 }),
             )?;
             text_constructor(&globals, "__svg", runtime.clone(), Component::Svg)?;
-            text_constructor(&globals, "__image", runtime.clone(), Component::Image)?;
+            local_image_constructor(&globals, "__image", runtime.clone(), Component::Image)?;
             text_constructor(
                 &globals,
                 "__accordion",
@@ -7345,7 +7345,7 @@ impl ShellRuntime {
             )?;
             globals.set("__pagination_items", Func::from(pagination_items))?;
             constructor(&globals, "__avatar", runtime.clone(), || Component::Avatar)?;
-            text_constructor(
+            local_image_constructor(
                 &globals,
                 "__avatar_image",
                 runtime.clone(),
@@ -8869,6 +8869,25 @@ fn text_constructor(
     globals.set(
         name,
         Func::from(move |ctx: Ctx<'_>, value: String| -> JsResult<SpecId> {
+            Ok(upgrade(&runtime, &ctx)?.push_node(build(value)))
+        }),
+    )
+}
+
+/// A constructor for an image read from the application's folder. The source
+/// is checked here, where the script hands it over, so no later step can take a
+/// URL for a file.
+fn local_image_constructor(
+    globals: &Object<'_>,
+    name: &str,
+    runtime: Weak<ShellRuntime>,
+    build: fn(String) -> Component,
+) -> JsResult<()> {
+    globals.set(
+        name,
+        Func::from(move |ctx: Ctx<'_>, value: String| -> JsResult<SpecId> {
+            crate::assets::check_local(&value)
+                .map_err(|error| Exception::throw_type(&ctx, &error))?;
             Ok(upgrade(&runtime, &ctx)?.push_node(build(value)))
         }),
     )

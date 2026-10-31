@@ -25,7 +25,7 @@ pub(crate) const WINDOW: &str = "a paint-only view cannot use the window: no foc
 
 /// The message for a refused window call: [`WINDOW`] when the call came from a
 /// paint-only view, so its author reads the rule rather than a timing hint.
-pub(crate) fn or(message: String) -> String {
+pub(crate) fn window_refusal_or(message: String) -> String {
     if crate::scope::current_policy().is_some_and(|policy| policy.is_paint_only()) {
         WINDOW.to_owned()
     } else {
@@ -66,13 +66,7 @@ fn refused_component(component: &Component) -> Option<String> {
         | Component::Svg(_)
         | Component::Image(_)
         | Component::Path { .. } => None,
-        other => {
-            let named = format!("{other:?}");
-            let end = named
-                .find(|c: char| !c.is_alphanumeric())
-                .unwrap_or(named.len());
-            Some(named[..end].to_owned())
-        }
+        other => Some(other.name().to_owned()),
     }
 }
 

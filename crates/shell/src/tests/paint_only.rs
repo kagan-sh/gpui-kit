@@ -189,3 +189,93 @@ fn a_paint_only_view_cannot_hold_input_state(cx: &mut TestAppContext) {
     };
     assert!(refused.contains("paint-only"), "{refused}");
 }
+
+fn image(source: &str) -> String {
+    format!(
+        r#"
+import {{ View, div, image }} from "gpui-kit";
+export default class Picture extends View {{
+  render() {{ return div().child(image({source:?})); }}
+}}
+"#
+    )
+}
+
+#[gpui::test]
+fn an_image_loads_only_from_the_application_folder(cx: &mut TestAppContext) {
+    for source in [
+        "https://example.com/a.png?d=secret",
+        "data:image/png;base64,AAAA",
+        "../outside.png",
+        "/etc/passwd",
+        "",
+    ] {
+        let (view, mut context) = mount(cx, &image(source), Policy::new());
+        let error = error(&view, &mut context).unwrap_or_else(|| panic!("{source:?} was loaded"));
+        assert!(
+            error.contains("relative path inside the application's folder"),
+            "{source}: {error}"
+        );
+    }
+    let (view, mut context) = mount(cx, &image("icons/a.png"), Policy::new());
+    assert_eq!(error(&view, &mut context), None);
+}
+
+#[gpui::test]
+fn a_refused_view_stops_its_timers(cx: &mut TestAppContext) {
+    let before = crate::engine::quickjs::task_count();
+    let (view, mut context) = mount(cx, FOCUSING, paint_only());
+    assert!(crate::engine::quickjs::task_count() > before);
+    context.executor().advance_clock(Duration::from_millis(50));
+    context.run_until_parked();
+    assert!(error(&view, &mut context).is_some());
+    assert_eq!(crate::engine::quickjs::task_count(), before);
+}
+
+const TURNING: &str = r#"
+import { View, div } from "gpui-kit";
+export default class Turn extends View {
+  init(_props, cx) {
+    this.ticks = 0;
+    this.tick = cx.timer.every(10, (cx) => { this.ticks += 1; cx.notify(); });
+  }
+  render() {
+    const box = div().w(10).h(10);
+    return div().size_full().child(this.ticks < 3 ? box : box.on_mouse_down_out(() => {}));
+  }
+}
+"#;
+
+#[gpui::test]
+fn a_view_that_turns_bad_later_is_refused_before_that_frame(cx: &mut TestAppContext) {
+    let (view, mut context) = mount(cx, TURNING, paint_only());
+    let mut clean_frames = 0;
+    for _ in 0..8 {
+        context.executor().advance_clock(Duration::from_millis(10));
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        let (error, tree) = context.update(|_, cx| {
+            let view = view.read(cx);
+            (
+                view.build_error().map(str::to_owned),
+                view.snapshot().map(crate::RenderSnapshot::debug_tree),
+            )
+        });
+        match error {
+            None => {
+                clean_frames += 1;
+                let tree = tree.expect("a clean frame is drawn");
+                assert!(!tree.contains("on_mouse_down_out"), "{tree}");
+            }
+            Some(error) => {
+                assert!(error.contains("on_mouse_down_out"), "{error}");
+                assert!(tree.is_none(), "a refused view still holds a frame");
+            }
+        }
+    }
+    assert!(clean_frames >= 2, "the view never drew cleanly");
+    assert!(
+        error(&view, &mut context).is_some(),
+        "the bad frame was never refused"
+    );
+}
