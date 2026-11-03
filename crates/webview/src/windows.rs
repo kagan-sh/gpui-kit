@@ -2,7 +2,9 @@
 
 use std::cell::Cell;
 use std::mem::ManuallyDrop;
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
@@ -152,10 +154,13 @@ impl NativeWebViewSurface {
 
     fn forward(&self, webview: Rc<wry::WebView>, window: &Window) -> Result<()> {
         let origin = self.origin.clone();
+        let scale = self.scale.clone();
         let id = self.surface.id();
         window
             .enable_window_composition()?
-            .on_input(id, move |input| deliver(&webview, origin.get(), input))?;
+            .on_input(id, move |input| {
+                deliver(&webview, origin.get(), scale.get(), input)
+            })?;
         Ok(())
     }
 
@@ -171,11 +176,14 @@ impl NativeWebViewSurface {
             }))
     }
 
-    pub(super) fn release(self, webview: Rc<wry::WebView>) {
+    pub(super) fn release(self, webview: Rc<wry::WebView>, user_data: Option<PathBuf>) {
         self.cx
             .clone()
             .spawn(async move |cx| {
                 drop(webview);
+                if let Some(path) = user_data {
+                    remove_user_data(&path);
+                }
                 let result = self.window.update(cx, |_, window, _| {
                     window
                         .enable_window_composition()?
@@ -189,14 +197,26 @@ impl NativeWebViewSurface {
     }
 }
 
+fn remove_user_data(path: &std::path::Path) {
+    for _ in 0..20 {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => return,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
+            Err(_) => std::thread::sleep(Duration::from_millis(50)),
+        }
+    }
+    log::warn!("could not remove WebView2 data at {}", path.display());
+}
+
 fn deliver(
     webview: &wry::WebView,
     origin: Point<Pixels>,
+    scale: f32,
     input: &PlatformInput,
 ) -> DispatchEventResult {
     let event = match input {
         PlatformInput::MouseMove(event) => {
-            let (x, y) = dip(origin, event.position);
+            let (x, y) = page_point(origin, event.position, scale);
             PagePointer::Move {
                 x,
                 y,
@@ -218,7 +238,7 @@ fn deliver(
                     default_prevented: false,
                 };
             };
-            let (x, y) = dip(origin, event.position);
+            let (x, y) = page_point(origin, event.position, scale);
             PagePointer::Button {
                 x,
                 y,
@@ -236,7 +256,7 @@ fn deliver(
                     default_prevented: false,
                 };
             };
-            let (x, y) = dip(origin, event.position);
+            let (x, y) = page_point(origin, event.position, scale);
             PagePointer::Button {
                 x,
                 y,
@@ -248,11 +268,14 @@ fn deliver(
             }
         }
         PlatformInput::Scroll(event) => {
-            let (x, y) = dip(origin, event.position);
+            let (x, y) = page_point(origin, event.position, scale);
+            let (lines, chars) = wheel_scroll_amounts();
+            let (delta_x, delta_y) = wheel_deltas(event.delta, lines, chars);
             PagePointer::Wheel {
                 x,
                 y,
-                delta: wheel_delta(event.delta),
+                delta_x,
+                delta_y,
                 control: event.modifiers.control,
                 shift: event.modifiers.shift,
             }
@@ -280,34 +303,92 @@ fn page_button(button: MouseButton) -> Option<PageButton> {
     }
 }
 
-fn dip(origin: Point<Pixels>, position: Point<Pixels>) -> (i32, i32) {
+/// Convert a GPUI logical point into the page's raw-pixel client coordinates.
+pub(super) fn page_point(origin: Point<Pixels>, position: Point<Pixels>, scale: f32) -> (i32, i32) {
     let point = position - origin;
     (
-        f64::from(point.x).round() as i32,
-        f64::from(point.y).round() as i32,
+        (f64::from(point.x) * f64::from(scale)).round() as i32,
+        (f64::from(point.y) * f64::from(scale)).round() as i32,
     )
 }
 
-// Win32's positive wheel points away from the user.
-pub(super) fn wheel_delta(delta: ScrollDelta) -> i32 {
-    let lines = match delta {
-        ScrollDelta::Lines(point) => f64::from(point.y),
-        ScrollDelta::Pixels(point) => f64::from(point.y) / 40.0,
+fn wheel_scroll_amounts() -> (f64, f64) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+        SystemParametersInfoW,
     };
-    (-lines * 120.0).round() as i32
+    let mut lines = 3u32;
+    let mut chars = 3u32;
+    // SAFETY: SPI writes into a local u32; a failed call leaves the defaults.
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLLINES,
+            0,
+            Some((&raw mut lines).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    let _ = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWHEELSCROLLCHARS,
+            0,
+            Some((&raw mut chars).cast()),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        )
+    };
+    (lines.max(1) as f64, chars.max(1) as f64)
+}
+
+/// Undo GPUI's Windows wheel normalization and restore Win32 `WHEEL_DELTA` ticks.
+///
+/// Positive `delta_y` is away from the user. Positive `delta_x` is tilt right; GPUI's
+/// horizontal wheel path negates Win32, so this path negates again.
+pub(super) fn wheel_deltas(delta: ScrollDelta, scroll_lines: f64, scroll_chars: f64) -> (i32, i32) {
+    let (x, y) = match delta {
+        ScrollDelta::Lines(point) => (f64::from(point.x), f64::from(point.y)),
+        ScrollDelta::Pixels(point) => (f64::from(point.x) / 40.0, f64::from(point.y) / 40.0),
+    };
+    let lines = scroll_lines.max(1.0);
+    let chars = scroll_chars.max(1.0);
+    let delta_y = (y / lines * 120.0).round() as i32;
+    let delta_x = (-x / chars * 120.0).round() as i32;
+    (delta_x, delta_y)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::wheel_delta;
+    use super::{page_point, wheel_deltas};
     use gpui::{ScrollDelta, point, px};
 
     #[test]
-    fn a_line_down_is_a_notch_toward_the_user() {
-        assert_eq!(wheel_delta(ScrollDelta::Lines(point(0.0, 1.0))), -120);
+    fn a_line_away_keeps_the_win32_sign() {
         assert_eq!(
-            wheel_delta(ScrollDelta::Pixels(point(px(0.0), px(40.0)))),
-            -120
+            wheel_deltas(ScrollDelta::Lines(point(0.0, 3.0)), 3.0, 3.0),
+            (0, 120)
+        );
+        assert_eq!(
+            wheel_deltas(ScrollDelta::Pixels(point(px(0.0), px(120.0))), 3.0, 3.0),
+            (0, 120)
+        );
+    }
+
+    #[test]
+    fn horizontal_wheel_undoes_gpui_sign() {
+        // GPUI stores WM_MOUSEHWHEEL tilt-right as a negative Lines.x after system chars.
+        assert_eq!(
+            wheel_deltas(ScrollDelta::Lines(point(-3.0, 0.0)), 3.0, 3.0),
+            (120, 0)
+        );
+    }
+
+    #[test]
+    fn page_points_scale_with_the_monitor() {
+        let origin = point(px(10.0), px(20.0));
+        assert_eq!(page_point(origin, point(px(10.0), px(20.0)), 1.0), (0, 0));
+        assert_eq!(page_point(origin, point(px(60.0), px(70.0)), 1.5), (75, 75));
+        assert_eq!(
+            page_point(origin, point(px(60.0), px(70.0)), 2.0),
+            (100, 100)
         );
     }
 }

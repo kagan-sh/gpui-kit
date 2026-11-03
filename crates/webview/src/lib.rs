@@ -24,6 +24,12 @@ use linux::NativeWebViewSurface;
 ))]
 use windows::NativeWebViewSurface;
 
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+use std::path::PathBuf;
 use std::{cell::Cell, ops::Deref, rc::Rc};
 
 use wry::Rect;
@@ -90,6 +96,13 @@ pub struct WebView {
         )
     ))]
     composition: Option<NativeWebViewSurface>,
+    /// Removed after the native page closes. WebView2 must finish with the folder first.
+    #[cfg(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    ))]
+    user_data: Option<PathBuf>,
     /// The GPUI scale factor the page zoom was last matched to.
     #[cfg(target_os = "linux")]
     scale_factor: Cell<f32>,
@@ -103,12 +116,13 @@ impl Drop for WebView {
         self.hide();
         #[cfg(all(
             feature = "gpui-fast",
-            any(
-                target_os = "macos",
-                target_os = "linux",
-                all(feature = "windows-composition", target_os = "windows")
-            )
+            feature = "windows-composition",
+            target_os = "windows"
         ))]
+        if let Some(surface) = self.composition.take() {
+            surface.release(self.webview.clone(), self.user_data.take());
+        }
+        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
         if let Some(surface) = self.composition.take() {
             surface.release(self.webview.clone());
         }
@@ -154,11 +168,27 @@ impl WebView {
                 )
             ))]
             composition: None,
+            #[cfg(all(
+                feature = "gpui-fast",
+                feature = "windows-composition",
+                target_os = "windows"
+            ))]
+            user_data: None,
             #[cfg(target_os = "linux")]
             scale_factor: Cell::new(window.scale_factor()),
             #[cfg(target_os = "linux")]
             origin,
         }
+    }
+
+    /// Delete `path` after the native page has closed. WebView2 keeps files open until then.
+    #[cfg(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    ))]
+    pub fn remove_user_data_when_closed(&mut self, path: PathBuf) {
+        self.user_data = Some(path);
     }
 
     /// Build a webview as a child of `window`, performing the platform setup Wry requires.
