@@ -281,17 +281,17 @@ impl NativeWebViewSurface {
     }
 }
 
-/// Apply the page cursor during paint: a mapped style on the hitbox, or a custom HCURSOR
-/// held in `current_cursor` and re-applied after the frame (GPUI has no raw CursorStyle).
+/// Apply the page cursor during paint. Composition hit testing records no page hitbox, so a
+/// mapped style uses the window cursor; leave clears it. A custom HCURSOR has no CursorStyle
+/// and is re-applied after the frame (and on move).
 pub(super) fn paint_cursor_for_page(
     page_cursor: &Cell<Option<PageCursor>>,
     current_cursor: &Rc<Cell<Option<*mut std::ffi::c_void>>>,
-    hitbox: &gpui::Hitbox,
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
     if let Some(PageCursor::Style(style)) = page_cursor.get() {
-        window.set_cursor_style(style, hitbox);
+        window.set_window_cursor_style(style);
         return;
     }
     let Some(raw) = current_cursor.get() else {

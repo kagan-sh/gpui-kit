@@ -607,7 +607,7 @@ impl Element for WebViewElement {
             feature = "windows-composition",
             target_os = "windows"
         ))]
-        if let Some(hitbox) = hitbox.as_ref() {
+        if hitbox.is_some() {
             let cells = self
                 .parent
                 .read(cx)
@@ -615,7 +615,7 @@ impl Element for WebViewElement {
                 .as_ref()
                 .map(|surface| surface.cursor_cells());
             if let Some((page_cursor, current_cursor)) = cells {
-                windows::paint_cursor_for_page(&page_cursor, &current_cursor, hitbox, window, cx);
+                windows::paint_cursor_for_page(&page_cursor, &current_cursor, window, cx);
             }
         }
         let bounds = hitbox.clone().map(|h| h.bounds).unwrap_or(bounds);
