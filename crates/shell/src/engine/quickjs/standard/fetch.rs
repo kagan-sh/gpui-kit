@@ -231,17 +231,16 @@ fn request(
     options: FetchOptions,
     injected_client: Option<reqwest::blocking::Client>,
 ) -> std::result::Result<FetchResponse, String> {
-    let client = match injected_client {
-        Some(client) => client,
-        None => client_builder()
-            .build()
-            .map_err(|error| format!("creating HTTP client failed: {error}"))?,
-    };
-
     let mut method = options.method;
     let mut headers = options.headers;
     let mut body = options.body;
     for _ in 0..=MAX_REDIRECTS {
+        // Each hop picks its own client so a loopback target never rides a
+        // proxy or a non-loopback DNS answer left over from an earlier hop.
+        let client = match &injected_client {
+            Some(client) => client.clone(),
+            None => http_client_for(&url)?,
+        };
         let response = client
             .request(method.clone(), url.clone())
             .headers(headers.clone())
@@ -324,10 +323,40 @@ fn client_builder() -> reqwest::blocking::ClientBuilder {
         .redirect(reqwest::redirect::Policy::none())
 }
 
+fn http_client_for(url: &reqwest::Url) -> std::result::Result<reqwest::blocking::Client, String> {
+    let mut builder = client_builder();
+    if is_loopback_host(url.host_str().unwrap_or_default()) {
+        builder = pin_loopback(builder);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("creating HTTP client failed: {error}"))
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Loopback hops must not leave the machine through a proxy or through a
+/// `localhost` DNS answer that points elsewhere.
+fn pin_loopback(builder: reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+    let loopback = [
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
+    ];
+    debug_assert!(loopback.iter().all(|addr| addr.ip().is_loopback()));
+    builder.no_proxy().resolve_to_addrs("localhost", &loopback)
+}
+
 #[cfg(test)]
 pub(super) fn direct_test_client() -> std::result::Result<reqwest::blocking::Client, reqwest::Error>
 {
-    client_builder().no_proxy().build()
+    pin_loopback(client_builder()).build()
 }
 
 fn authorize_redirect(
@@ -378,6 +407,24 @@ fn same_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_hosts_are_recognised_by_name_and_address() {
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("::1"));
+        assert!(!is_loopback_host("example.test"));
+        assert!(!is_loopback_host("192.168.0.1"));
+    }
+
+    #[test]
+    fn a_loopback_client_builds_with_proxy_bypass() {
+        let url = reqwest::Url::parse("http://127.0.0.1:9/").expect("URL");
+        http_client_for(&url).expect("loopback client");
+        let url = reqwest::Url::parse("http://localhost:9/").expect("URL");
+        http_client_for(&url).expect("localhost client");
+    }
 
     #[test]
     fn only_location_redirect_statuses_are_followed() {
