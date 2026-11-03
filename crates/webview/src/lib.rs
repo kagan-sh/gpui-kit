@@ -646,22 +646,33 @@ impl Element for WebViewElement {
             target_os = "windows"
         ))]
         if hitbox.is_some() {
-            let parent = self.parent.read(cx);
-            if let Some(surface) = parent.composition.as_ref() {
-                if let Some(layer) = surface.take_pointer_layer() {
+            let painted = {
+                let parent = self.parent.read(cx);
+                parent.composition.as_ref().and_then(|surface| {
+                    let layer = surface.take_pointer_layer()?;
                     let (page_cursor, current_cursor) = surface.cursor_cells();
                     let (origin, scale) = surface.origin_and_scale();
-                    windows::paint_cursor_for_page(
-                        &page_cursor,
-                        &current_cursor,
-                        &layer,
-                        &parent.webview,
+                    Some((
+                        page_cursor,
+                        current_cursor,
+                        layer,
+                        parent.webview.clone(),
                         origin,
                         scale,
-                        window,
-                        cx,
-                    );
-                }
+                    ))
+                })
+            };
+            if let Some((page_cursor, current_cursor, layer, webview, origin, scale)) = painted {
+                windows::paint_cursor_for_page(
+                    &page_cursor,
+                    &current_cursor,
+                    &layer,
+                    &webview,
+                    origin,
+                    scale,
+                    window,
+                    cx,
+                );
             }
         }
         let bounds = hitbox.clone().map(|h| h.bounds).unwrap_or(bounds);
