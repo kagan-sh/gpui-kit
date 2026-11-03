@@ -325,8 +325,9 @@ fn client_builder() -> reqwest::blocking::ClientBuilder {
 
 fn http_client_for(url: &reqwest::Url) -> std::result::Result<reqwest::blocking::Client, String> {
     let mut builder = client_builder();
-    if is_loopback_host(url.host_str().unwrap_or_default()) {
-        builder = pin_loopback(builder);
+    let host = url.host_str().unwrap_or_default();
+    if is_loopback_host(host) {
+        builder = pin_loopback(builder, host);
     }
     builder
         .build()
@@ -334,25 +335,37 @@ fn http_client_for(url: &reqwest::Url) -> std::result::Result<reqwest::blocking:
 }
 
 fn is_loopback_host(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || is_loopback_literal(host)
+    let bare = host.trim_end_matches('.');
+    let dns = bare.to_ascii_lowercase();
+    dns == "localhost" || dns.ends_with(".localhost") || is_loopback_literal(host)
 }
 
-/// True for `127.0.0.0/8`, `::1`, and IPv4-mapped forms such as
-/// `[::ffff:127.0.0.1]` that dial loopback once brackets are stripped.
+/// True for `127.0.0.0/8`, `0.0.0.0`, `::1`, `::`, and IPv4-mapped forms such as
+/// `[::ffff:127.0.0.1]` and `[::ffff:0:0]` that dial this computer once brackets
+/// are stripped.
 fn is_loopback_literal(raw: &str) -> bool {
     let address = raw.trim_start_matches('[').trim_end_matches(']');
     match address.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback(),
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_unspecified(),
         Ok(std::net::IpAddr::V6(ip)) => {
-            ip.is_loopback() || ip.to_ipv4_mapped().is_some_and(|ip| ip.is_loopback())
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip
+                    .to_ipv4_mapped()
+                    .is_some_and(|ip| ip.is_loopback() || ip.is_unspecified())
         }
         Err(_) => false,
     }
 }
 
 /// Loopback hops must not leave the machine through a proxy or through a
-/// `localhost` DNS answer that points elsewhere.
-fn pin_loopback(builder: reqwest::blocking::ClientBuilder) -> reqwest::blocking::ClientBuilder {
+/// `localhost` DNS answer that points elsewhere. The request host is pinned too
+/// when it is a name (`localhost.`, `foo.localhost`), so a poisoned DNS answer
+/// cannot send it off this computer. IP literals need no DNS pin.
+fn pin_loopback(
+    builder: reqwest::blocking::ClientBuilder,
+    host: &str,
+) -> reqwest::blocking::ClientBuilder {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
     let loopback = [
@@ -360,7 +373,12 @@ fn pin_loopback(builder: reqwest::blocking::ClientBuilder) -> reqwest::blocking:
         SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0),
     ];
     debug_assert!(loopback.iter().all(|addr| addr.ip().is_loopback()));
-    builder.no_proxy().resolve_to_addrs("localhost", &loopback)
+    let builder = builder.no_proxy().resolve_to_addrs("localhost", &loopback);
+    if host.eq_ignore_ascii_case("localhost") || is_loopback_literal(host) {
+        builder
+    } else {
+        builder.resolve_to_addrs(host, &loopback)
+    }
 }
 
 #[cfg(test)]
@@ -371,7 +389,11 @@ pub(super) fn direct_test_client() -> std::result::Result<reqwest::blocking::Cli
     // Resolve `localhost` to TEST-NET-1 first; `pin_loopback` must replace it.
     // A missing pin dials 192.0.2.1 and the request fails.
     let poisoned = [SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 0)];
-    pin_loopback(client_builder().resolve_to_addrs("localhost", &poisoned)).build()
+    pin_loopback(
+        client_builder().resolve_to_addrs("localhost", &poisoned),
+        "localhost",
+    )
+    .build()
 }
 
 fn authorize_redirect(
@@ -427,12 +449,19 @@ mod tests {
     fn loopback_hosts_are_recognised_by_name_and_address() {
         assert!(is_loopback_host("localhost"));
         assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("localhost."));
+        assert!(is_loopback_host("foo.localhost"));
+        assert!(is_loopback_host("Foo.Localhost."));
         assert!(is_loopback_host("127.0.0.1"));
+        assert!(is_loopback_host("0.0.0.0"));
         assert!(is_loopback_host("::1"));
         assert!(is_loopback_host("[::1]"));
+        assert!(is_loopback_host("::"));
+        assert!(is_loopback_host("[::]"));
         assert!(is_loopback_host("::ffff:127.0.0.1"));
         assert!(is_loopback_host("[::ffff:127.0.0.1]"));
         assert!(is_loopback_host("[::ffff:7f00:1]"));
+        assert!(is_loopback_host("[::ffff:0:0]"));
         assert!(!is_loopback_host("example.test"));
         assert!(!is_loopback_host("192.168.0.1"));
         assert!(!is_loopback_host("::ffff:c0a8:1"));
@@ -460,14 +489,16 @@ mod tests {
         let loopback = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
         let port = loopback.local_addr().expect("loopback address").port();
         let loopback_server = thread::spawn(move || {
-            let (mut stream, _) = loopback.accept().expect("loopback connection");
-            let mut request = [0; 1024];
-            let _ = stream.read(&mut request);
-            stream
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlocal",
-                )
-                .expect("loopback response");
+            for _ in 0..3 {
+                let (mut stream, _) = loopback.accept().expect("loopback connection");
+                let mut request = [0; 1024];
+                let _ = stream.read(&mut request);
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nlocal",
+                    )
+                    .expect("loopback response");
+            }
         });
 
         let poisoned = [SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 0)];
@@ -484,15 +515,19 @@ mod tests {
             "poisoned localhost resolve reached loopback without a pin"
         );
 
-        let client = pin_loopback(client_builder().resolve_to_addrs("localhost", &poisoned))
-            .build()
-            .expect("pinned client");
-        let response = client
-            .get(format!("http://localhost:{port}/pin"))
-            .send()
-            .expect("localhost fetch");
-        assert_eq!(response.status(), reqwest::StatusCode::OK);
-        assert_eq!(response.text().expect("body"), "local");
+        for host in ["localhost", "localhost.", "foo.localhost"] {
+            let mut builder = client_builder().resolve_to_addrs("localhost", &poisoned);
+            if host != "localhost" {
+                builder = builder.resolve_to_addrs(host, &poisoned);
+            }
+            let client = pin_loopback(builder, host).build().expect("pinned client");
+            let response = client
+                .get(format!("http://{host}:{port}/pin"))
+                .send()
+                .unwrap_or_else(|error| panic!("{host} fetch: {error}"));
+            assert_eq!(response.status(), reqwest::StatusCode::OK, "{host}");
+            assert_eq!(response.text().expect("body"), "local", "{host}");
+        }
         loopback_server.join().expect("loopback server");
     }
 
