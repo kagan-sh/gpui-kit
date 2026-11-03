@@ -4493,6 +4493,28 @@ impl ShellRuntime {
         });
     }
 
+    /// Delivers one drag event: the payload, and the phase or the side the
+    /// handler's kind reports. A side of `None` is a target the pointer left.
+    pub(crate) fn dispatch_drag(
+        self: &Rc<Self>,
+        id: CallbackId,
+        payload: gpui::SharedString,
+        key: &'static str,
+        value: Option<&'static str>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        self.dispatch_simple_event(id, "drag", window, cx, move |ctx| {
+            let event = Object::new(ctx.clone())?;
+            event.set("payload", payload.as_ref())?;
+            match value {
+                Some(value) => event.set(key, value)?,
+                None => event.set(key, rquickjs::Null)?,
+            }
+            Ok(event)
+        });
+    }
+
     /// The lifetime checks, scope entry and job drain every dispatch shares,
     /// with only the payload left to the caller.
     ///
@@ -7441,6 +7463,9 @@ impl ShellRuntime {
                 "on_mouse_down_out",
                 "on_scroll_wheel",
                 "on_pinch",
+                "on_drag",
+                "on_drag_move",
+                "on_drop",
                 "on_action",
                 "key_context",
                 "aria_level",
@@ -8333,6 +8358,46 @@ impl ShellRuntime {
                     self.push_op(id, SpecOp::ActionCallback(action.into(), callback)),
                 )
             }
+            // The payload rides beside the handler as a method op, the way an
+            // `id` does, so the handler stays an ordinary `Callback`.
+            "on_drag" => {
+                if scope::current_phase() == Some(ScopePhase::Layout)
+                    && !self.interactive_inline_layout.get()
+                {
+                    return Err(js_error::type_error(
+                        ctx,
+                        "`on_drag` cannot be registered from a virtual list's item \
+                         renderer: the rows are rebuilt every frame, so a handler \
+                         registered there would pile up for as long as the view stood",
+                    ));
+                }
+                let payload = args
+                    .first_value()
+                    .and_then(|value| value.as_str().ok().map(str::to_owned))
+                    .ok_or_else(|| {
+                        js_error::type_error(
+                            ctx,
+                            "on_drag(payload, handler) expects the payload first, as a string",
+                        )
+                    })?;
+                let saved = args.handler_at(1).ok_or_else(|| {
+                    js_error::type_error(ctx, "on_drag(payload, handler) expects a function second")
+                })?;
+                let callback = self.callbacks.borrow_mut().push(CallbackEntry {
+                    value: saved,
+                    view: scope::current_view().map(|view| view.downgrade()),
+                    application: scope::current_application_generation(),
+                    registered_in: scope::current_generation(),
+                });
+                self.push_op_checked(
+                    ctx,
+                    self.push_op(
+                        id,
+                        SpecOp::Method("drag_payload", smallvec::smallvec![Bridged::Str(payload)]),
+                    ),
+                )?;
+                self.push_op_checked(ctx, self.push_op(id, SpecOp::Callback("on_drag", callback)))
+            }
             // The only two element methods that take an argument *and* a
             // handler. The button is folded into the recorded op name — three
             // fixed names GPUI's own `MouseButton` maps onto — so the op stays
@@ -8415,6 +8480,8 @@ impl ShellRuntime {
             | "on_mouse_down_out"
             | "on_scroll_wheel"
             | "on_pinch"
+            | "on_drag_move"
+            | "on_drop"
             | "tab_bar"
             | "empty_group"
             | "drop_indicator"
@@ -10655,6 +10722,8 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_mouse_down_out" => "on_mouse_down_out",
         "on_scroll_wheel" => "on_scroll_wheel",
         "on_pinch" => "on_pinch",
+        "on_drag_move" => "on_drag_move",
+        "on_drop" => "on_drop",
         "on_item_click" => "on_item_click",
         "on_item_secondary_click" => "on_item_secondary_click",
         "on_visible_range_change" => "on_visible_range_change",

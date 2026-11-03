@@ -77,6 +77,8 @@ fn refused_op(op: &SpecOp) -> Option<String> {
             takes_input(name).then(|| name.to_owned())
         }
         SpecOp::ParamStyle(name, _) => takes_input(name).then(|| (*name).to_owned()),
+        // Recorded by `on_drag` beside its handler, and named after the call.
+        SpecOp::Method("drag_payload", _) => Some("on_drag".to_owned()),
         SpecOp::Method(name, _) => (!matches!(
             *name,
             "id" | "transition"

@@ -8,6 +8,7 @@
 
 mod benchmark;
 mod dock;
+mod drag;
 mod fs;
 mod host_api;
 mod http_request;

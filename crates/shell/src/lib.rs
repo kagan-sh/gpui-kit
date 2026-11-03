@@ -77,6 +77,7 @@ pub use input_tokens::{
 pub mod components;
 pub(crate) mod dependencies;
 pub mod dock;
+pub(crate) mod drag;
 pub(crate) mod engine;
 pub(crate) mod entities;
 pub(crate) mod error;
@@ -121,6 +122,7 @@ pub use component_registry::{
     MethodDescriptor, RegistryError, StateDescriptor, StateMethodDescriptor,
 };
 pub(crate) use component_registry::{ComponentCallbackValue, ComponentId, RecordedComponentMethod};
+pub use drag::{DragElement, drag_elements};
 pub use engine::{LoadedApplication, ShellRuntime};
 pub use error::ShellError;
 #[cfg(not(feature = "gpui-fast"))]

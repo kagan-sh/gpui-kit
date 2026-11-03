@@ -1261,6 +1261,35 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     modifiers: Modifiers;
   }
 
+  /**
+   * What an `on_drag` handler receives: once when the drag starts, and once
+   * when it ends. `ended` is a drop on a target; `cancelled` is Escape or a
+   * release anywhere else.
+   */
+  export interface DragEvent {
+    payload: string;
+    phase: "started" | "ended" | "cancelled";
+  }
+
+  /** Where on a target the pointer is: its top quarter, middle half, or bottom quarter. */
+  export type DropSide = "top" | "middle" | "bottom";
+
+  /**
+   * What an `on_drag_move` handler receives when a drag enters this target,
+   * moves to another side of it, or leaves it. `side` is `null` once the
+   * pointer has left, and when the drag ends over it.
+   */
+  export interface DragMoveEvent {
+    payload: string;
+    side: DropSide | null;
+  }
+
+  /** What an `on_drop` handler receives. */
+  export interface DropEvent {
+    payload: string;
+    side: DropSide;
+  }
+
   /** What an `on_pinch` handler receives. */
   export interface PinchEvent {
     /**
@@ -1527,6 +1556,30 @@ const ELEMENT_METHODS: &str = r#"    /**
      * by `1 + event.delta` to follow it.
      */
     on_pinch<Self extends Element>(this: Self, handler: (event: PinchEvent, cx: Context) => void): Self;
+    /**
+     * GPUI `StatefulInteractiveElement::on_drag`: makes this element a drag
+     * source carrying `payload`, such as a record's id.
+     *
+     * The drag starts once the pointer moves a few pixels with the button
+     * held, so a click still clicks. It follows the pointer outside this
+     * element until the release. Escape, or a release outside every target,
+     * cancels it. Nothing is drawn under the pointer: paint the source as
+     * dragged from the `started` phase, until `ended` or `cancelled`. Only a
+     * `div`, `h_flex` or `v_flex` carries it.
+     */
+    on_drag<Self extends Element>(this: Self, payload: string, handler: (event: DragEvent, cx: Context) => void): Self;
+    /**
+     * GPUI `InteractiveElement::on_drag_move`, for a drop target: called when
+     * a drag from this script enters this element, moves between its top,
+     * middle and bottom, or leaves it. Only the innermost target under the
+     * pointer is entered.
+     */
+    on_drag_move<Self extends Element>(this: Self, handler: (event: DragMoveEvent, cx: Context) => void): Self;
+    /**
+     * GPUI `InteractiveElement::on_drop`: a drag from this script released
+     * over this element, when it is the innermost target under the pointer.
+     */
+    on_drop<Self extends Element>(this: Self, handler: (event: DropEvent, cx: Context) => void): Self;
     /**
      * `handler(event, cx)` when the named action is dispatched to this element
      * or to something inside it.
@@ -4306,6 +4359,9 @@ mod tests {
         "on_mouse_down_out",
         "on_scroll_wheel",
         "on_pinch",
+        "on_drag",
+        "on_drag_move",
+        "on_drop",
         "on_action",
         "key_context",
         "image",
