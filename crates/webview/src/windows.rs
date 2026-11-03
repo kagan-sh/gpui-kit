@@ -9,8 +9,8 @@ use std::time::Duration;
 use anyhow::Result;
 use gpui::{
     AnyWindowHandle, AppContext as _, AsyncApp, Bounds, CursorStyle, DispatchEventResult, Hitbox,
-    HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
-    PlatformInput, Point, ScrollDelta, Window, point, px, size,
+    HitboxBehavior, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, PlatformInput, Point, ScrollDelta, Window, point, px, size,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageButton, PagePointer, WebViewExtWindows as _};
@@ -98,6 +98,10 @@ pub(super) struct NativeWebViewSurface {
     current_cursor: Rc<Cell<Option<*mut std::ffi::c_void>>>,
     /// Overlay hitbox above the page for the current frame. Refreshed in prepaint.
     pointer_layer: Cell<Option<Hitbox>>,
+    /// Whether the overlay pointer layer was hovered on the last forwarded move.
+    pointer_over: Rc<Cell<bool>>,
+    /// Buttons pressed on the page (Left=1, Right=2, Middle=4). Captures until release.
+    pointer_buttons: Rc<Cell<u8>>,
     window: AnyWindowHandle,
     cx: AsyncApp,
 }
@@ -114,6 +118,8 @@ impl NativeWebViewSurface {
             page_cursor: Rc::new(Cell::new(None)),
             current_cursor: Rc::new(Cell::new(None)),
             pointer_layer: Cell::new(None),
+            pointer_over: Rc::new(Cell::new(false)),
+            pointer_buttons: Rc::new(Cell::new(0)),
             window: window.window_handle(),
             cx: cx.to_async(),
         })
@@ -126,6 +132,17 @@ impl NativeWebViewSurface {
         Rc<Cell<Option<*mut std::ffi::c_void>>>,
     ) {
         (self.page_cursor.clone(), self.current_cursor.clone())
+    }
+
+    pub(super) fn pointer_tracking(
+        &self,
+    ) -> (Rc<Cell<bool>>, Rc<Cell<u8>>, AnyWindowHandle, AsyncApp) {
+        (
+            self.pointer_over.clone(),
+            self.pointer_buttons.clone(),
+            self.window,
+            self.cx.clone(),
+        )
     }
 
     pub(super) fn origin_and_scale(&self) -> (Point<Pixels>, f32) {
@@ -314,16 +331,22 @@ impl NativeWebViewSurface {
 /// Apply the page cursor during paint, and forward move/click through the overlay
 /// pointer layer. That layer is above the native surface and below menus, so it is
 /// hovered only while the page owns the pointer; a mapped style then uses the layer
-/// hitbox. `set_window_cursor_style` would outrank every menu. The layer also takes
-/// move/click from composition input, so those events are delivered here; wheel and
-/// leave still arrive through `on_input`.
+/// hitbox. `set_window_cursor_style` would outrank every menu. The layer takes
+/// move/click from composition input (wheel still arrives through `on_input`). A
+/// press captures until release so a drag that leaves the page still gets moves
+/// and the up; leaving the layer without a capture sends Leave, because the
+/// native surface is never hovered while the layer is present.
 pub(super) fn paint_cursor_for_page(
-    page_cursor: &Cell<Option<PageCursor>>,
+    page_cursor: &Rc<Cell<Option<PageCursor>>>,
     current_cursor: &Rc<Cell<Option<*mut std::ffi::c_void>>>,
+    pointer_over: &Rc<Cell<bool>>,
+    pointer_buttons: &Rc<Cell<u8>>,
     layer: &Hitbox,
     webview: &Rc<wry::WebView>,
     origin: Point<Pixels>,
     scale: f32,
+    handle: AnyWindowHandle,
+    async_cx: &AsyncApp,
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
@@ -347,29 +370,65 @@ pub(super) fn paint_cursor_for_page(
 
     let webview = webview.clone();
     let layer = layer.clone();
+    let page_cursor = page_cursor.clone();
+    let current_cursor = current_cursor.clone();
+    let pointer_over = pointer_over.clone();
+    let pointer_buttons = pointer_buttons.clone();
+    let async_cx = async_cx.clone();
     window.on_mouse_event({
         let webview = webview.clone();
         let layer = layer.clone();
+        let page_cursor = page_cursor.clone();
+        let current_cursor = current_cursor.clone();
+        let pointer_over = pointer_over.clone();
+        let pointer_buttons = pointer_buttons.clone();
+        let async_cx = async_cx.clone();
         move |event: &MouseMoveEvent, phase, window, cx| {
-            if !phase.bubble() || !layer.is_hovered(window) {
+            if !phase.bubble() {
                 return;
             }
-            let _ = deliver(
-                &webview,
-                origin,
-                scale,
-                &PlatformInput::MouseMove(event.clone()),
-            );
-            cx.stop_propagation();
+            let hovered = layer.is_hovered(window);
+            let step =
+                super::layer_pointer_move(hovered, pointer_over.get(), pointer_buttons.get() != 0);
+            if step.deliver {
+                let _ = deliver(
+                    &webview,
+                    origin,
+                    scale,
+                    &PlatformInput::MouseMove(event.clone()),
+                );
+                cx.stop_propagation();
+            }
+            if step.leave {
+                leave_page(
+                    &webview,
+                    origin,
+                    scale,
+                    &page_cursor,
+                    &current_cursor,
+                    handle,
+                    &async_cx,
+                    event.position,
+                    event.pressed_button,
+                    event.modifiers,
+                );
+            }
+            pointer_over.set(hovered);
         }
     });
     window.on_mouse_event({
         let webview = webview.clone();
         let layer = layer.clone();
+        let pointer_over = pointer_over.clone();
+        let pointer_buttons = pointer_buttons.clone();
         move |event: &MouseDownEvent, phase, window, cx| {
-            if !phase.bubble() || !layer.is_hovered(window) {
+            if !phase.bubble() || !super::layer_pointer_down(layer.is_hovered(window)) {
                 return;
             }
+            if let Some(bit) = button_mask(event.button) {
+                pointer_buttons.set(pointer_buttons.get() | bit);
+            }
+            pointer_over.set(true);
             let _ = deliver(
                 &webview,
                 origin,
@@ -380,8 +439,20 @@ pub(super) fn paint_cursor_for_page(
         }
     });
     window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
-        if !phase.bubble() || !layer.is_hovered(window) {
+        if !phase.bubble() {
             return;
+        }
+        let hovered = layer.is_hovered(window);
+        let bit = button_mask(event.button);
+        let button_captured = bit.is_some_and(|bit| pointer_buttons.get() & bit != 0);
+        let other_captured = bit.is_some_and(|bit| pointer_buttons.get() & !bit != 0)
+            || (bit.is_none() && pointer_buttons.get() != 0);
+        let step = super::layer_pointer_up(hovered, button_captured, other_captured);
+        if !step.deliver {
+            return;
+        }
+        if let Some(bit) = bit {
+            pointer_buttons.set(pointer_buttons.get() & !bit);
         }
         let _ = deliver(
             &webview,
@@ -389,8 +460,66 @@ pub(super) fn paint_cursor_for_page(
             scale,
             &PlatformInput::MouseUp(event.clone()),
         );
+        if step.leave {
+            leave_page(
+                &webview,
+                origin,
+                scale,
+                &page_cursor,
+                &current_cursor,
+                handle,
+                &async_cx,
+                event.position,
+                None,
+                event.modifiers,
+            );
+            pointer_over.set(false);
+        } else {
+            pointer_over.set(hovered);
+        }
         cx.stop_propagation();
     });
+}
+
+fn button_mask(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0b001),
+        MouseButton::Right => Some(0b010),
+        MouseButton::Middle => Some(0b100),
+        MouseButton::Navigate(_) => None,
+    }
+}
+
+fn leave_page(
+    webview: &wry::WebView,
+    origin: Point<Pixels>,
+    scale: f32,
+    page_cursor: &Cell<Option<PageCursor>>,
+    current_cursor: &Cell<Option<*mut std::ffi::c_void>>,
+    handle: AnyWindowHandle,
+    cx: &AsyncApp,
+    position: Point<Pixels>,
+    pressed_button: Option<MouseButton>,
+    modifiers: gpui::Modifiers,
+) {
+    page_cursor.set(None);
+    current_cursor.set(None);
+    let _ = deliver(
+        webview,
+        origin,
+        scale,
+        &PlatformInput::MouseExited(MouseExitEvent {
+            position,
+            pressed_button,
+            modifiers,
+        }),
+    );
+    let handle = handle;
+    let cx = cx.clone();
+    cx.spawn(async move |cx| {
+        let _ = handle.update(cx, |_, window, _| window.refresh());
+    })
+    .detach();
 }
 
 fn set_cursor(cursor: Option<*mut std::ffi::c_void>) {

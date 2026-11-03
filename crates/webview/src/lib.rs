@@ -57,14 +57,136 @@ fn page_owns_pointer_cursor(pointer_in_page: bool, layer_hovered: bool) -> bool 
     pointer_in_page && layer_hovered
 }
 
+/// What a move over the Windows page pointer layer should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayerMove {
+    deliver: bool,
+    leave: bool,
+}
+
+/// Forward while hovered or while a press is captured; leave when hover ends
+/// without a captured press (composition never sends MouseExited for the layer).
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_move(hovered: bool, was_hovered: bool, capturing: bool) -> LayerMove {
+    LayerMove {
+        deliver: hovered || capturing,
+        leave: was_hovered && !hovered && !capturing,
+    }
+}
+
+/// A press is taken only while the layer is hovered.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_down(hovered: bool) -> bool {
+    hovered
+}
+
+/// What a release over the Windows page pointer layer should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayerUp {
+    deliver: bool,
+    leave: bool,
+}
+
+/// Keep the release with a captured press even off the layer; leave once the
+/// last captured button goes up away from the page.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_up(hovered: bool, button_captured: bool, other_captured: bool) -> LayerUp {
+    LayerUp {
+        deliver: hovered || button_captured,
+        leave: button_captured && !hovered && !other_captured,
+    }
+}
+
 #[cfg(test)]
 mod page_cursor_tests {
+    use super::{LayerMove, LayerUp, layer_pointer_down, layer_pointer_move, layer_pointer_up};
+
     #[test]
     fn page_cursor_yields_when_an_overlay_owns_the_pointer() {
         assert!(super::page_owns_pointer_cursor(true, true));
         assert!(!super::page_owns_pointer_cursor(true, false));
         assert!(!super::page_owns_pointer_cursor(false, true));
         assert!(!super::page_owns_pointer_cursor(false, false));
+    }
+
+    #[test]
+    fn layer_sends_leave_when_hover_ends_without_a_capture() {
+        assert_eq!(
+            layer_pointer_move(false, true, false),
+            LayerMove {
+                deliver: false,
+                leave: true,
+            }
+        );
+        assert_eq!(
+            layer_pointer_move(false, true, true),
+            LayerMove {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_move(true, false, false),
+            LayerMove {
+                deliver: true,
+                leave: false,
+            }
+        );
+    }
+
+    #[test]
+    fn layer_keeps_a_drag_until_release_even_off_the_page() {
+        assert!(layer_pointer_down(true));
+        assert!(!layer_pointer_down(false));
+        assert_eq!(
+            layer_pointer_up(false, true, false),
+            LayerUp {
+                deliver: true,
+                leave: true,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(false, true, true),
+            LayerUp {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(true, false, false),
+            LayerUp {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(false, false, false),
+            LayerUp {
+                deliver: false,
+                leave: false,
+            }
+        );
     }
 }
 
@@ -651,25 +773,47 @@ impl Element for WebViewElement {
                 parent.composition.as_ref().and_then(|surface| {
                     let layer = surface.take_pointer_layer()?;
                     let (page_cursor, current_cursor) = surface.cursor_cells();
+                    let (pointer_over, pointer_buttons, handle, async_cx) =
+                        surface.pointer_tracking();
                     let (origin, scale) = surface.origin_and_scale();
                     Some((
                         page_cursor,
                         current_cursor,
+                        pointer_over,
+                        pointer_buttons,
                         layer,
                         parent.webview.clone(),
                         origin,
                         scale,
+                        handle,
+                        async_cx,
                     ))
                 })
             };
-            if let Some((page_cursor, current_cursor, layer, webview, origin, scale)) = painted {
+            if let Some((
+                page_cursor,
+                current_cursor,
+                pointer_over,
+                pointer_buttons,
+                layer,
+                webview,
+                origin,
+                scale,
+                handle,
+                async_cx,
+            )) = painted
+            {
                 windows::paint_cursor_for_page(
                     &page_cursor,
                     &current_cursor,
+                    &pointer_over,
+                    &pointer_buttons,
                     &layer,
                     &webview,
                     origin,
                     scale,
+                    handle,
+                    &async_cx,
                     window,
                     cx,
                 );
