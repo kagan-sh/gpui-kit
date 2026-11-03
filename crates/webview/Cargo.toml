@@ -16,6 +16,9 @@ version = "0.8.1"
 # page on macOS and Linux. `gpui-kit/gpui-fast` selects the backend; enable both together, a
 # mismatch fails to compile. Without either, the native view covers GPUI content in its bounds.
 gpui-fast = ["dep:objc2", "dep:objc2-foundation"]
+# Hosts WebView2 in GPUI Fast's DirectComposition visual. Needs a wry that implements
+# `WebViewBuilder::build_as_composition`.
+windows-composition = ["dep:windows"]
 inspector = ["wry/devtools"]
 
 [lib]
@@ -34,3 +37,6 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", optional = true, features = ["Win32_Foundation"] }

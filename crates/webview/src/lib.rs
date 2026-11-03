@@ -6,11 +6,23 @@ mod composition;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+mod windows;
 
 #[cfg(all(feature = "gpui-fast", target_os = "macos"))]
 use composition::NativeWebViewSurface;
 #[cfg(all(feature = "gpui-fast", target_os = "linux"))]
 use linux::NativeWebViewSurface;
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+use windows::NativeWebViewSurface;
 
 use std::{cell::Cell, ops::Deref, rc::Rc};
 
@@ -55,8 +67,9 @@ impl WebViewHandle {
 /// A webview based on wry WebView.
 ///
 /// With the `gpui-fast` feature, macOS and Linux host the native view in a window
-/// composition surface, so deferred GPUI overlays render above the page. Without it, the
-/// native view covers GPUI content in its bounds and extends past a container that clips it.
+/// composition surface, so deferred GPUI overlays render above the page. Windows does the
+/// same when `windows-composition` is also on. Without that, the native view covers GPUI
+/// content in its bounds and extends past a container that clips it.
 ///
 /// [experimental]
 pub struct WebView {
@@ -68,7 +81,14 @@ pub struct WebView {
     zoom: Cell<f64>,
     /// Whether the last geometry update failed, so each failure is logged once until it recovers.
     geometry_failed: Cell<bool>,
-    #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        feature = "gpui-fast",
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(feature = "windows-composition", target_os = "windows")
+        )
+    ))]
     composition: Option<NativeWebViewSurface>,
     /// The GPUI scale factor the page zoom was last matched to.
     #[cfg(target_os = "linux")]
@@ -81,7 +101,14 @@ pub struct WebView {
 impl Drop for WebView {
     fn drop(&mut self) {
         self.hide();
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = self.composition.take() {
             surface.release(self.webview.clone());
         }
@@ -119,7 +146,13 @@ impl WebView {
             webview: Rc::new(webview),
             #[cfg(all(feature = "gpui-fast", target_os = "macos"))]
             composition,
-            #[cfg(all(feature = "gpui-fast", target_os = "linux"))]
+            #[cfg(all(
+                feature = "gpui-fast",
+                any(
+                    target_os = "linux",
+                    all(feature = "windows-composition", target_os = "windows")
+                )
+            ))]
             composition: None,
             #[cfg(target_os = "linux")]
             scale_factor: Cell::new(window.scale_factor()),
@@ -139,6 +172,19 @@ impl WebView {
         window: &mut Window,
         cx: &mut App,
     ) -> wry::Result<Self> {
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        {
+            return windows::build(builder, window, cx);
+        }
+        #[cfg(not(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        )))]
         #[cfg(target_os = "linux")]
         let webview = {
             let parent = linux::X11Parent::new(window)?;
@@ -157,16 +203,35 @@ impl WebView {
 
             builder.build_as_child(&parent)?
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(
+            not(target_os = "linux"),
+            not(all(
+                feature = "gpui-fast",
+                feature = "windows-composition",
+                target_os = "windows"
+            ))
+        ))]
         let webview = builder.build_as_child(&*window)?;
 
+        #[cfg(not(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        )))]
         Ok(Self::new(webview, window, cx))
     }
 
     /// Set window-relative bounds, including offscreen loading bounds.
     /// With window composition, position the managed container and its child together.
     pub fn set_bounds(&self, bounds: Rect) -> wry::Result<()> {
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             return surface
                 .set_bounds(&self.webview, bounds)
@@ -187,7 +252,14 @@ impl WebView {
         let visible = document.intersect(&clip);
         if visible.is_empty() || !self.visible.get() {
             self.set_native_visible(false)?;
-            #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                feature = "gpui-fast",
+                any(
+                    target_os = "macos",
+                    target_os = "linux",
+                    all(feature = "windows-composition", target_os = "windows")
+                )
+            ))]
             if let Some(surface) = &self.composition {
                 // Hidden preparation still gives WebKit its real layout width.
                 if self.visible.get() && !document.is_empty() {
@@ -196,7 +268,14 @@ impl WebView {
             }
             return Ok(());
         }
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             surface.set_geometry(&self.webview, document, visible)?;
             surface.set_visible(true)?;
@@ -227,7 +306,14 @@ impl WebView {
     // visibility preference, so prepaint can retry when the view becomes unclipped.
     fn set_native_visible(&self, visible: bool) -> wry::Result<()> {
         self.webview.set_visible(visible)?;
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             surface
                 .set_visible(visible)
@@ -441,7 +527,14 @@ impl Element for WebViewElement {
         }
 
         let parent = self.parent.read(cx);
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &parent.composition {
             surface.set_scale_factor(window.scale_factor());
         }

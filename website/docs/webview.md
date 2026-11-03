@@ -56,7 +56,7 @@ gpui-webview = { version = "{{gpui_kit_version}}", features = ["gpui-fast"] }
 
 `gpui-webview/gpui-fast` does not switch the backend itself; it enables the composition path. The two features must agree, and a mismatch fails to compile: with only `gpui-kit/gpui-fast`, `gpui-webview` asks for `gpui-webview/gpui-fast`; with only `gpui-webview/gpui-fast`, it asks for `gpui-kit/gpui-fast`.
 
-With `gpui-fast` on macOS, `WebView::new()` automatically registers the WKWebView in the window composition tree. On Linux, `WebView::build()` builds the view in a composition surface, an X11 child window that GPUI cuts the overlays above it out of. Deferred GPUI overlays can then render above the page. Windows retains the native child-view behavior on both backends.
+With `gpui-fast` on macOS, `WebView::new()` automatically registers the WKWebView in the window composition tree. On Linux, `WebView::build()` builds the view in a composition surface, an X11 child window that GPUI cuts the overlays above it out of. Deferred GPUI overlays can then render above the page. On Windows, `windows-composition` together with `gpui-fast` hosts WebView2 in the DirectComposition visual, so overlays render above the page. That feature needs a wry that implements `WebViewBuilder::build_as_composition`, and DirectComposition must stay enabled. Without the feature, Windows keeps the native child view.
 
 On gpui-pre, the native view is attached to the window directly, as on Windows. It covers GPUI content in its bounds, including popovers, dialogs, menus, and tooltips. It cannot be clipped either: when its container clips it only partly, for example in a scrolled region, the native view keeps its full bounds and extends past the container, over the neighboring UI. It is hidden only when it is scrolled out of view entirely or the application hides it. The same applies when GPUI Fast cannot create the composition surface.
 
@@ -152,9 +152,9 @@ For an application smoke test on each supported OS, exercise initial load, links
 | Area | Current behavior |
 | --- | --- |
 | Platforms | Experimental on macOS, Windows, and Linux on X11. Wayland is not supported; Linux applications must start on X11 or XWayland. |
-| Overlay order | The native WebView sits above the GPUI surface and covers GPUI content in the same rectangle, including popovers, dialogs, menus, and tooltips. On Windows, and on gpui-pre, a GPUI overlay cannot reliably appear on top of it. With `gpui-fast`, macOS and Linux use native composition for deferred overlays. |
-| Clipping | With `gpui-fast`, macOS and Linux clip the native view to its container without resizing the page. On gpui-pre and on Windows, a partly clipped native view extends past its container. |
-| Windows renderer | The repository example sets `GPUI_DISABLE_DIRECT_COMPOSITION=true` before starting GPUI so this child-view approach renders. This is an example-specific requirement, not a general GPUI setting recommendation. |
+| Overlay order | Without composition, the native WebView sits above the GPUI surface and covers GPUI content in the same rectangle, including popovers, dialogs, menus, and tooltips. With `gpui-fast`, macOS and Linux use native composition for deferred overlays. Windows does the same when `windows-composition` is also on. |
+| Clipping | With `gpui-fast`, macOS and Linux clip the native view to its container without resizing the page. Windows composition clips to the visible rectangle by sizing the page to it. On gpui-pre, and on Windows without `windows-composition`, a partly clipped native view extends past its container. |
+| Windows renderer | The child-view example sets `GPUI_DISABLE_DIRECT_COMPOSITION=true`. `windows-composition` needs DirectComposition left on. |
 
 When an overlay must be visible, place the WebView in a separate window or arrange the screen so the overlay does not cross its bounds. This restriction applies to Windows and to gpui-pre; with `gpui-fast`, macOS and Linux support deferred GPUI overlays through native composition.
 
