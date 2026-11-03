@@ -1,6 +1,7 @@
 //! WebView2 hosted in GPUI Fast's DirectComposition visual, between the window and its overlays.
 
 use std::cell::Cell;
+use std::mem::ManuallyDrop;
 use std::rc::Rc;
 
 use anyhow::Result;
@@ -8,7 +9,6 @@ use gpui::{
     AnyWindowHandle, AsyncApp, Bounds, DispatchEventResult, MouseButton, Pixels, PlatformInput,
     Point, ScrollDelta, Window, point, px, size,
 };
-use windows::core::Interface;
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageButton, PagePointer, WebViewExtWindows as _};
 
@@ -19,11 +19,11 @@ pub(super) fn build(
 ) -> wry::Result<super::WebView> {
     let surface = NativeWebViewSurface::new(window, cx)
         .map_err(|error| wry::Error::Io(std::io::Error::other(format!("{error:#}"))))?;
-    let visual = match surface.visual_ptr() {
+    let visual = match surface.visual() {
         Ok(visual) => visual,
         Err(error) => return Err(surface.abandon(window, io_error(error))),
     };
-    let webview = match builder.build_as_composition(&*window, visual) {
+    let webview = match builder.build_as_composition(&*window, visual.as_wry()) {
         Ok(webview) => webview,
         Err(error) => return Err(surface.abandon(window, error)),
     };
@@ -37,6 +37,36 @@ pub(super) fn build(
     }
     view.composition = Some(surface);
     Ok(view)
+}
+
+/// GPUI's visual is a windows 0.62 `IUnknown`. wry's API takes windows 0.61.
+/// The COM vtable is the same. This holds GPUI's reference and a non-owning wrapper.
+struct ComposedVisual {
+    _keep: windows::core::IUnknown,
+    borrowed: ManuallyDrop<windows_061::core::IUnknown>,
+}
+
+impl ComposedVisual {
+    fn from_handle(handle: Box<dyn std::any::Any>) -> Result<Self> {
+        let keep = handle
+            .downcast::<windows::core::IUnknown>()
+            .map_err(|_| anyhow::anyhow!("native surface is not a DirectComposition visual"))?;
+        let raw = windows::core::Interface::as_raw(keep.as_ref());
+        // SAFETY: `keep` is GPUI's live composition visual. windows 0.61 and 0.62 share the
+        // IUnknown ABI. from_raw does not AddRef. ManuallyDrop skips Release, so this wrapper
+        // does not drop GPUI's reference and stays valid while `keep` is held.
+        let borrowed = ManuallyDrop::new(unsafe {
+            <windows_061::core::IUnknown as windows_061::core::Interface>::from_raw(raw)
+        });
+        Ok(Self {
+            _keep: *keep,
+            borrowed,
+        })
+    }
+
+    fn as_wry(&self) -> &windows_061::core::IUnknown {
+        &self.borrowed
+    }
 }
 
 fn io_error(error: impl std::fmt::Display) -> wry::Error {
@@ -65,12 +95,9 @@ impl NativeWebViewSurface {
         })
     }
 
-    fn visual_ptr(&self) -> Result<*mut std::ffi::c_void> {
+    fn visual(&self) -> Result<ComposedVisual> {
         let handle = self.surface.platform_surface()?.platform_handle()?;
-        let unknown = handle
-            .downcast::<windows::core::IUnknown>()
-            .map_err(|_| anyhow::anyhow!("native surface is not a DirectComposition visual"))?;
-        Ok(unknown.as_raw())
+        ComposedVisual::from_handle(handle)
     }
 
     fn abandon(self, window: &mut Window, error: wry::Error) -> wry::Error {
@@ -136,11 +163,9 @@ impl NativeWebViewSurface {
         self.surface
             .platform_surface()?
             .set_compositor_recreated_callback(Rc::new(move |visual| {
-                let unknown = visual.downcast::<windows::core::IUnknown>().map_err(|_| {
-                    anyhow::anyhow!("native surface is not a DirectComposition visual")
-                })?;
+                let visual = ComposedVisual::from_handle(visual)?;
                 webview
-                    .set_root_visual(unknown.as_raw())
+                    .set_root_visual(visual.as_wry())
                     .map_err(|error| anyhow::anyhow!("{error}"))?;
                 Ok(())
             }))
