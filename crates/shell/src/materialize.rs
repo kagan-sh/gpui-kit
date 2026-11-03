@@ -380,6 +380,12 @@ struct Behavior {
     on_scroll_wheel: Option<CallbackId>,
     /// A pinch-to-zoom gesture over this element.
     on_pinch: Option<CallbackId>,
+    /// What this element carries when it is dragged, recorded beside
+    /// `on_drag` by the same call.
+    drag_payload: Option<SharedString>,
+    on_drag: Option<CallbackId>,
+    on_drag_move: Option<CallbackId>,
+    on_drop: Option<CallbackId>,
     /// Handlers for named actions, one entry per action listened for.
     ///
     /// A list because an element that responds to actions usually responds to
@@ -579,6 +585,18 @@ struct Behavior {
 }
 
 impl Behavior {
+    fn drag_handlers(&self) -> Option<crate::drag::Handlers> {
+        let handlers = crate::drag::Handlers {
+            on_drag: self.on_drag.filter(|_| self.drag_payload.is_some()),
+            on_drag_move: self.on_drag_move,
+            on_drop: self.on_drop,
+        };
+        (handlers.on_drag.is_some()
+            || handlers.on_drag_move.is_some()
+            || handlers.on_drop.is_some())
+        .then_some(handlers)
+    }
+
     /// Whether anything asked for a pointer listener, and so for the box every
     /// pointer position is reported against.
     fn wants_pointer_geometry(&self) -> bool {
@@ -613,6 +631,7 @@ impl Behavior {
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
             || self.on_pinch.is_some()
+            || self.drag_handlers().is_some()
             || !self.on_action.is_empty()
             || self.key_context.is_some()
             || self.window_control_area.is_some()
@@ -1964,6 +1983,20 @@ mouse_button_event_fields!(gpui::MouseUpEvent);
 /// Widening this is one call per component rather than a new mechanism, the
 /// same as [`components::tooltip::warn_unhonoured_tooltip`] says of its own.
 fn warn_unhonoured_input(component: &Component, behavior: &Behavior) {
+    // GPUI's drag lives on a stateful `div`; a control that builds its own
+    // interior has no slot for it.
+    if behavior.drag_handlers().is_some()
+        && !matches!(
+            component,
+            Component::Div | Component::HFlex | Component::VFlex
+        )
+    {
+        tracing::warn!(
+            "`on_drag`, `on_drag_move` and `on_drop` are not wired on a {}: only a plain \
+             `div`, `h_flex` or `v_flex` carries GPUI's drag. Wrap it and write them on the wrapper",
+            component.name()
+        );
+    }
     if honours_input(component) {
         return;
     }
@@ -2143,6 +2176,7 @@ fn flex_element(
         && behavior.on_mouse_down_out.is_none()
         && behavior.on_scroll_wheel.is_none()
         && behavior.on_pinch.is_none()
+        && behavior.drag_handlers().is_none()
         && behavior.on_action.is_empty()
         && behavior.key_context.is_none()
         && !behavior.scroll_x
@@ -2163,6 +2197,12 @@ fn flex_element(
     let stateful = with_gpui_focus(stateful, &behavior, focus.as_ref());
     let stateful = with_input_handlers(stateful, &behavior, runtime);
     let stateful = components::dock::with_commands(stateful, &behavior, runtime, cx);
+    let stateful = match behavior.drag_handlers() {
+        Some(handlers) => {
+            crate::drag::with_drag(stateful, behavior.drag_payload.clone(), handlers, runtime)
+        }
+        None => stateful,
+    };
     let stateful = with_aria(stateful, &behavior);
     let stateful = with_window_control(stateful, &behavior);
     let mut stateful = with_active_and_focus(stateful, &states);
@@ -2602,6 +2642,9 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
                 "on_pinch" => behavior.on_pinch = Some(*id),
+                "on_drag" => behavior.on_drag = Some(*id),
+                "on_drag_move" => behavior.on_drag_move = Some(*id),
+                "on_drop" => behavior.on_drop = Some(*id),
                 "on_resize" => behavior.on_resize = Some(*id),
                 "on_change" => behavior.on_change = Some(*id),
                 "token" => behavior.token = Some(*id),
@@ -3055,6 +3098,12 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                 .map(|level| level.max(1.0) as usize);
         }
         "keep_mounted" => behavior.keep_mounted = flag.unwrap_or(true),
+        "drag_payload" => {
+            behavior.drag_payload = args
+                .first()
+                .and_then(|value| value.as_str().ok())
+                .map(SharedString::from);
+        }
         "key_context" => {
             behavior.key_context = args
                 .first()

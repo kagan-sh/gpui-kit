@@ -111,6 +111,8 @@ fn every_way_to_take_input_fails_a_paint_only_view(cx: &mut TestAppContext) {
             "on_mouse_down_out",
         ),
         ("div().on_click(() => {})", "on_click"),
+        ("div().on_drag(\"x\", () => {})", "on_drag"),
+        ("div().on_drop(() => {})", "on_drop"),
         ("div().on_key_down(() => {})", "on_key_down"),
         ("div().hover((s) => s.bg(\"#ff0000\"))", "hover"),
         ("div().cursor_pointer()", "cursor_pointer"),
