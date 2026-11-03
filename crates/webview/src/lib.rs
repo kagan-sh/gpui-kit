@@ -40,6 +40,34 @@ use gpui::{
     ParentElement as _, Pixels, Render, Size, Style, Styled as _, Window, canvas, div,
 };
 
+/// Whether the page may claim a cursor style at the pointer.
+///
+/// The overlay pointer layer is hovered only while it is the topmost hitbox there.
+/// When a menu opens under a still pointer, the layer is no longer hovered, so the
+/// page must not keep an I-beam or hand above the menu.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn page_owns_pointer_cursor(pointer_in_page: bool, layer_hovered: bool) -> bool {
+    pointer_in_page && layer_hovered
+}
+
+#[cfg(test)]
+mod page_cursor_tests {
+    #[test]
+    fn page_cursor_yields_when_an_overlay_owns_the_pointer() {
+        assert!(super::page_owns_pointer_cursor(true, true));
+        assert!(!super::page_owns_pointer_cursor(true, false));
+        assert!(!super::page_owns_pointer_cursor(false, true));
+        assert!(!super::page_owns_pointer_cursor(false, false));
+    }
+}
+
 // `gpui-kit` selects the GPUI backend; this crate's `gpui-fast` feature only follows it, so
 // the two must agree. A mismatch would otherwise keep the gpui-pre attachment on GPUI Fast.
 const _: () = {
@@ -589,7 +617,17 @@ impl Element for WebViewElement {
         }
 
         // The native view covers this area, so GPUI content below it must not receive input.
-        Some(window.insert_hitbox(visible, gpui::HitboxBehavior::BlockMouse))
+        let hitbox = window.insert_hitbox(visible, gpui::HitboxBehavior::BlockMouse);
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if let Some(surface) = parent.composition.as_ref() {
+            let layer = surface.insert_pointer_layer(visible, window).ok();
+            surface.set_pointer_layer(layer);
+        }
+        Some(hitbox)
     }
 
     fn paint(
@@ -608,14 +646,22 @@ impl Element for WebViewElement {
             target_os = "windows"
         ))]
         if hitbox.is_some() {
-            let cells = self
-                .parent
-                .read(cx)
-                .composition
-                .as_ref()
-                .map(|surface| surface.cursor_cells());
-            if let Some((page_cursor, current_cursor)) = cells {
-                windows::paint_cursor_for_page(&page_cursor, &current_cursor, window, cx);
+            let parent = self.parent.read(cx);
+            if let Some(surface) = parent.composition.as_ref() {
+                if let Some(layer) = surface.take_pointer_layer() {
+                    let (page_cursor, current_cursor) = surface.cursor_cells();
+                    let (origin, scale) = surface.origin_and_scale();
+                    windows::paint_cursor_for_page(
+                        &page_cursor,
+                        &current_cursor,
+                        &layer,
+                        &parent.webview,
+                        origin,
+                        scale,
+                        window,
+                        cx,
+                    );
+                }
             }
         }
         let bounds = hitbox.clone().map(|h| h.bounds).unwrap_or(bounds);

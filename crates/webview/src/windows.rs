@@ -8,8 +8,9 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    AnyWindowHandle, AppContext as _, AsyncApp, Bounds, CursorStyle, DispatchEventResult,
-    MouseButton, Pixels, PlatformInput, Point, ScrollDelta, Window, point, px, size,
+    AnyWindowHandle, AppContext as _, AsyncApp, Bounds, CursorStyle, DispatchEventResult, Hitbox,
+    HitboxBehavior, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels,
+    PlatformInput, Point, ScrollDelta, Window, point, px, size,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageButton, PagePointer, WebViewExtWindows as _};
@@ -95,6 +96,8 @@ pub(super) struct NativeWebViewSurface {
     page_cursor: Rc<Cell<Option<PageCursor>>>,
     /// Custom image cursor held for as long as the page hitbox is hovered.
     current_cursor: Rc<Cell<Option<*mut std::ffi::c_void>>>,
+    /// Overlay hitbox above the page for the current frame. Refreshed in prepaint.
+    pointer_layer: Cell<Option<Hitbox>>,
     window: AnyWindowHandle,
     cx: AsyncApp,
 }
@@ -110,6 +113,7 @@ impl NativeWebViewSurface {
             scale: Rc::new(Cell::new(window.scale_factor())),
             page_cursor: Rc::new(Cell::new(None)),
             current_cursor: Rc::new(Cell::new(None)),
+            pointer_layer: Cell::new(None),
             window: window.window_handle(),
             cx: cx.to_async(),
         })
@@ -122,6 +126,32 @@ impl NativeWebViewSurface {
         Rc<Cell<Option<*mut std::ffi::c_void>>>,
     ) {
         (self.page_cursor.clone(), self.current_cursor.clone())
+    }
+
+    pub(super) fn origin_and_scale(&self) -> (Point<Pixels>, f32) {
+        (self.origin.get(), self.scale.get())
+    }
+
+    pub(super) fn take_pointer_layer(&self) -> Option<Hitbox> {
+        self.pointer_layer.take()
+    }
+
+    pub(super) fn set_pointer_layer(&self, layer: Option<Hitbox>) {
+        self.pointer_layer.set(layer);
+    }
+
+    /// Hitbox on the overlay surface over the page. Composition leaves the base page
+    /// hitbox out of the hover stack on the native surface; this layer is hovered only
+    /// while no menu or other overlay sits above the pointer.
+    pub(super) fn insert_pointer_layer(
+        &self,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+    ) -> Result<Hitbox> {
+        let overlay = window.enable_window_composition()?.overlay_surface();
+        window.with_composition_surface(overlay, |window| {
+            window.insert_hitbox(bounds, HitboxBehavior::Normal)
+        })
     }
 
     fn visual(&self) -> Result<ComposedVisual> {
@@ -281,28 +311,85 @@ impl NativeWebViewSurface {
     }
 }
 
-/// Apply the page cursor during paint. Composition hit testing records no page hitbox, so a
-/// mapped style uses the window cursor; leave clears it. A custom HCURSOR has no CursorStyle
-/// and is re-applied after the frame (and on move).
+/// Apply the page cursor during paint, and forward move/click through the overlay
+/// pointer layer. That layer is above the native surface and below menus, so it is
+/// hovered only while the page owns the pointer; a mapped style then uses the layer
+/// hitbox. `set_window_cursor_style` would outrank every menu. The layer also takes
+/// move/click from composition input, so those events are delivered here; wheel and
+/// leave still arrive through `on_input`.
 pub(super) fn paint_cursor_for_page(
     page_cursor: &Cell<Option<PageCursor>>,
     current_cursor: &Rc<Cell<Option<*mut std::ffi::c_void>>>,
+    layer: &Hitbox,
+    webview: &Rc<wry::WebView>,
+    origin: Point<Pixels>,
+    scale: f32,
     window: &mut Window,
     cx: &mut gpui::App,
 ) {
-    if let Some(PageCursor::Style(style)) = page_cursor.get() {
-        window.set_window_cursor_style(style);
-        return;
-    }
-    let Some(raw) = current_cursor.get() else {
-        return;
-    };
-    set_cursor(Some(raw));
-    let current_cursor = current_cursor.clone();
-    window.defer(cx, move |_, _| {
-        if let Some(raw) = current_cursor.get() {
+    let mouse = window.mouse_position();
+    let bounds = layer.bounds.intersect(&layer.content_mask.bounds);
+    let in_page = bounds.contains(&mouse);
+    let hovered = layer.is_hovered(window);
+    if super::page_owns_pointer_cursor(in_page, hovered) {
+        if let Some(PageCursor::Style(style)) = page_cursor.get() {
+            window.set_cursor_style(style, layer);
+        } else if let Some(raw) = current_cursor.get() {
             set_cursor(Some(raw));
+            let current_cursor = current_cursor.clone();
+            window.defer(cx, move |_, _| {
+                if let Some(raw) = current_cursor.get() {
+                    set_cursor(Some(raw));
+                }
+            });
         }
+    }
+
+    let webview = webview.clone();
+    let layer = layer.clone();
+    window.on_mouse_event({
+        let webview = webview.clone();
+        let layer = layer.clone();
+        move |event: &MouseMoveEvent, phase, window, cx| {
+            if !phase.bubble() || !layer.is_hovered(window) {
+                return;
+            }
+            let _ = deliver(
+                &webview,
+                origin,
+                scale,
+                &PlatformInput::MouseMove(event.clone()),
+            );
+            cx.stop_propagation();
+        }
+    });
+    window.on_mouse_event({
+        let webview = webview.clone();
+        let layer = layer.clone();
+        move |event: &MouseDownEvent, phase, window, cx| {
+            if !phase.bubble() || !layer.is_hovered(window) {
+                return;
+            }
+            let _ = deliver(
+                &webview,
+                origin,
+                scale,
+                &PlatformInput::MouseDown(event.clone()),
+            );
+            cx.stop_propagation();
+        }
+    });
+    window.on_mouse_event(move |event: &MouseUpEvent, phase, window, cx| {
+        if !phase.bubble() || !layer.is_hovered(window) {
+            return;
+        }
+        let _ = deliver(
+            &webview,
+            origin,
+            scale,
+            &PlatformInput::MouseUp(event.clone()),
+        );
+        cx.stop_propagation();
     });
 }
 
