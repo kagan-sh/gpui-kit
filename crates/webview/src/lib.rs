@@ -600,8 +600,24 @@ impl Element for WebViewElement {
         _: &mut Self::RequestLayoutState,
         hitbox: &mut Self::PrepaintState,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) {
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if let Some(hitbox) = hitbox.as_ref() {
+            let cells = self
+                .parent
+                .read(cx)
+                .composition
+                .as_ref()
+                .map(|surface| surface.cursor_cells());
+            if let Some((page_cursor, current_cursor)) = cells {
+                windows::paint_cursor_for_page(&page_cursor, &current_cursor, hitbox, window, cx);
+            }
+        }
         let bounds = hitbox.clone().map(|h| h.bounds).unwrap_or(bounds);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let webview = self.view.clone();

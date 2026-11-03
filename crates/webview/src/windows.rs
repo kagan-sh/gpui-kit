@@ -8,11 +8,20 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    AnyWindowHandle, AppContext as _, AsyncApp, Bounds, DispatchEventResult, MouseButton, Pixels,
-    PlatformInput, Point, ScrollDelta, Window, point, px, size,
+    AnyWindowHandle, AppContext as _, AsyncApp, Bounds, CursorStyle, DispatchEventResult,
+    MouseButton, Pixels, PlatformInput, Point, ScrollDelta, Window, point, px, size,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageButton, PagePointer, WebViewExtWindows as _};
+
+/// The page cursor to apply while the hitbox is hovered.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum PageCursor {
+    Style(CursorStyle),
+    /// A CSS image cursor. GPUI has no `CursorStyle` for it, so the host keeps
+    /// the `HCURSOR` and re-applies it after each frame and pointer move.
+    Custom(*mut std::ffi::c_void),
+}
 
 pub(super) fn build(
     builder: wry::WebViewBuilder,
@@ -82,6 +91,10 @@ pub(super) struct NativeWebViewSurface {
     surface: gpui::WindowCompositionSurface,
     origin: Rc<Cell<Point<Pixels>>>,
     scale: Rc<Cell<f32>>,
+    /// Page cursor while the hitbox is hovered. Cleared on leave.
+    page_cursor: Rc<Cell<Option<PageCursor>>>,
+    /// Custom image cursor held for as long as the page hitbox is hovered.
+    current_cursor: Rc<Cell<Option<*mut std::ffi::c_void>>>,
     window: AnyWindowHandle,
     cx: AsyncApp,
 }
@@ -95,9 +108,20 @@ impl NativeWebViewSurface {
             surface,
             origin: Rc::new(Cell::new(Point::default())),
             scale: Rc::new(Cell::new(window.scale_factor())),
+            page_cursor: Rc::new(Cell::new(None)),
+            current_cursor: Rc::new(Cell::new(None)),
             window: window.window_handle(),
             cx: cx.to_async(),
         })
+    }
+
+    pub(super) fn cursor_cells(
+        &self,
+    ) -> (
+        Rc<Cell<Option<PageCursor>>>,
+        Rc<Cell<Option<*mut std::ffi::c_void>>>,
+    ) {
+        (self.page_cursor.clone(), self.current_cursor.clone())
     }
 
     fn visual(&self) -> Result<ComposedVisual> {
@@ -158,10 +182,24 @@ impl NativeWebViewSurface {
     fn forward(&self, webview: Rc<wry::WebView>, window: &Window) -> Result<()> {
         let origin = self.origin.clone();
         let scale = self.scale.clone();
+        let page_cursor = self.page_cursor.clone();
+        let current_cursor = self.current_cursor.clone();
+        let handle = self.window;
+        let cx = self.cx.clone();
         let id = self.surface.id();
         window
             .enable_window_composition()?
             .on_input(id, move |input| {
+                if matches!(input, PlatformInput::MouseExited(_)) {
+                    page_cursor.set(None);
+                    current_cursor.set(None);
+                    cx.spawn(async move |cx| {
+                        let _ = handle.update(cx, |_, window, _| window.refresh());
+                    })
+                    .detach();
+                } else if current_cursor.get().is_some() {
+                    set_cursor(current_cursor.get());
+                }
                 deliver(&webview, origin.get(), scale.get(), input)
             })?;
         Ok(())
@@ -180,9 +218,25 @@ impl NativeWebViewSurface {
     }
 
     fn forward_cursor(&self, webview: Rc<wry::WebView>) -> Result<()> {
+        let page_cursor = self.page_cursor.clone();
+        let current_cursor = self.current_cursor.clone();
+        let handle = self.window;
+        let cx = self.cx.clone();
         webview
-            .on_cursor_changed(Box::new(|cursor| {
-                apply_page_cursor(cursor);
+            .on_cursor_changed(Box::new(move |cursor| {
+                let next = style_for(cursor);
+                match next {
+                    Some(PageCursor::Custom(raw)) => current_cursor.set(Some(raw)),
+                    _ => current_cursor.set(None),
+                }
+                page_cursor.set(next);
+                if let Some(PageCursor::Custom(raw)) = next {
+                    set_cursor(Some(raw));
+                }
+                cx.spawn(async move |cx| {
+                    let _ = handle.update(cx, |_, window, _| window.refresh());
+                })
+                .detach();
             }))
             .map_err(|error| anyhow::anyhow!("{error}"))
     }
@@ -210,8 +264,9 @@ impl NativeWebViewSurface {
                 drop(webview);
                 if let Some(path) = user_data {
                     cx.background_spawn(async move {
-                        if let Some(exited) = exited {
-                            let _ = exited.recv_timeout(Duration::from_secs(5));
+                        if let Some((rx, env)) = exited {
+                            let _ = rx.recv_timeout(Duration::from_secs(5));
+                            drop(env);
                         }
                         remove_user_data(&path);
                     })
@@ -222,21 +277,65 @@ impl NativeWebViewSurface {
     }
 }
 
-fn apply_page_cursor(cursor: Option<*mut std::ffi::c_void>) {
-    use windows::Win32::UI::WindowsAndMessaging::{HCURSOR, IDC_ARROW, LoadCursorW, SetCursor};
-    // SAFETY: WebView2's HCURSOR is valid for SetCursor; IDC_ARROW is a shared system cursor.
-    unsafe {
-        match cursor {
-            Some(raw) => {
-                let _ = SetCursor(Some(HCURSOR(raw)));
-            }
-            None => {
-                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
-                    let _ = SetCursor(Some(arrow));
-                }
-            }
-        }
+/// Apply the page cursor during paint: a mapped style on the hitbox, or a custom HCURSOR
+/// held in `current_cursor` and re-applied after the frame (GPUI has no raw CursorStyle).
+pub(super) fn paint_cursor_for_page(
+    page_cursor: &Cell<Option<PageCursor>>,
+    current_cursor: &Rc<Cell<Option<*mut std::ffi::c_void>>>,
+    hitbox: &gpui::Hitbox,
+    window: &mut Window,
+    cx: &mut gpui::App,
+) {
+    if let Some(PageCursor::Style(style)) = page_cursor.get() {
+        window.set_cursor_style(style, hitbox);
+        return;
     }
+    let Some(raw) = current_cursor.get() else {
+        return;
+    };
+    set_cursor(Some(raw));
+    let current_cursor = current_cursor.clone();
+    window.defer(cx, move |_, _| {
+        if let Some(raw) = current_cursor.get() {
+            set_cursor(Some(raw));
+        }
+    });
+}
+
+fn set_cursor(cursor: Option<*mut std::ffi::c_void>) {
+    use windows::Win32::UI::WindowsAndMessaging::{HCURSOR, SetCursor};
+    // SAFETY: WebView2's HCURSOR is valid for SetCursor for the page's lifetime.
+    unsafe {
+        let _ = SetCursor(cursor.map(HCURSOR));
+    }
+}
+
+/// Map a WebView2 cursor to a GPUI style by comparing with the shared system cursors.
+fn style_for(cursor: Option<*mut std::ffi::c_void>) -> Option<PageCursor> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_NO, IDC_SIZENESW, IDC_SIZENS, IDC_SIZENWSE,
+        IDC_SIZEWE, LoadCursorW,
+    };
+    let raw = cursor?;
+    // SAFETY: LoadCursorW with a system IDC returns a shared HCURSOR; pointer equality is stable.
+    let system = |id| unsafe { LoadCursorW(None, id).ok().map(|c| c.0) };
+    let matched = [
+        (system(IDC_IBEAM), CursorStyle::IBeam),
+        (system(IDC_HAND), CursorStyle::PointingHand),
+        (system(IDC_SIZEWE), CursorStyle::ResizeLeftRight),
+        (system(IDC_SIZENS), CursorStyle::ResizeUpDown),
+        (system(IDC_SIZENWSE), CursorStyle::ResizeUpLeftDownRight),
+        (system(IDC_SIZENESW), CursorStyle::ResizeUpRightDownLeft),
+        (system(IDC_CROSS), CursorStyle::Crosshair),
+        (system(IDC_NO), CursorStyle::OperationNotAllowed),
+        (system(IDC_ARROW), CursorStyle::Arrow),
+    ]
+    .into_iter()
+    .find_map(|(handle, style)| (handle == Some(raw)).then_some(style));
+    Some(match matched {
+        Some(style) => PageCursor::Style(style),
+        None => PageCursor::Custom(raw),
+    })
 }
 
 fn remove_user_data(path: &std::path::Path) {
@@ -269,10 +368,7 @@ fn deliver(
                 shift: event.modifiers.shift,
             }
         }
-        PlatformInput::MouseExited(_) => {
-            apply_page_cursor(None);
-            PagePointer::Leave
-        }
+        PlatformInput::MouseExited(_) => PagePointer::Leave,
         PlatformInput::MouseDown(event) => {
             if event.button == MouseButton::Left {
                 let _ = webview.focus();
@@ -402,8 +498,13 @@ pub(super) fn wheel_deltas(delta: ScrollDelta, scroll_lines: f64, scroll_chars: 
 
 #[cfg(test)]
 mod tests {
-    use super::{page_point, wheel_deltas};
+    use super::{page_point, style_for, wheel_deltas};
     use gpui::{ScrollDelta, point, px};
+
+    #[test]
+    fn clearing_the_page_cursor_drops_the_style() {
+        assert!(style_for(None).is_none());
+    }
 
     #[test]
     fn a_line_away_keeps_the_win32_sign() {
