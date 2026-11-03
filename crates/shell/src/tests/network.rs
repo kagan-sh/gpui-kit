@@ -1262,46 +1262,15 @@ fn fetch_to_loopback_bypasses_http_proxy(cx: &mut TestAppContext) {
     );
 }
 
-/// `localhost` must resolve only to loopback addresses. A peer listening on a
-/// non-loopback address for the same port must never see the request.
+/// `localhost` must resolve only to loopback. The test HTTP client first
+/// resolves `localhost` to TEST-NET-1 (`192.0.2.1`), then `pin_loopback`
+/// replaces it. Without the pin the request never reaches the loopback
+/// listener and this assertion fails. See also
+/// `fetch::tests::pin_loopback_overrides_a_poisoned_localhost_resolve`.
 #[gpui::test]
 fn fetch_to_localhost_never_contacts_a_non_loopback_address(cx: &mut TestAppContext) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-
     let loopback = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
     let port = loopback.local_addr().expect("loopback address").port();
-    let alien = match TcpListener::bind(std::net::SocketAddr::new(
-        std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
-        port,
-    )) {
-        Ok(listener) => listener,
-        Err(_) => {
-            // Some hosts refuse 127.0.0.2; the resolve pin is still covered by
-            // the loopback success below and by the unit tests on the client.
-            drop(loopback);
-            return;
-        }
-    };
-    let alien_hit = std::sync::Arc::new(AtomicBool::new(false));
-    let alien_flag = alien_hit.clone();
-    let alien_server = thread::spawn(move || {
-        alien.set_nonblocking(true).expect("alien nonblocking");
-        let deadline = std::time::Instant::now() + Duration::from_millis(800);
-        while std::time::Instant::now() < deadline {
-            match alien.accept() {
-                Ok((mut stream, _)) => {
-                    alien_flag.store(true, Ordering::SeqCst);
-                    let mut request = [0; 1024];
-                    let _ = stream.read(&mut request);
-                    return;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => panic!("alien accept: {error}"),
-            }
-        }
-    });
     let loopback_server = thread::spawn(move || {
         let (mut stream, _) = loopback.accept().expect("loopback connection");
         let mut request = [0; 1024];
@@ -1312,7 +1281,7 @@ fn fetch_to_localhost_never_contacts_a_non_loopback_address(cx: &mut TestAppCont
     });
 
     let source = FETCH_PROBE.replace("__URL__", &format!("http://localhost:{port}/pin"));
-    let (_runtime, view, mut context) = production_probe(
+    let (runtime, view, mut context) = production_probe(
         cx,
         &source,
         Capabilities::new().http_requests([crate::HttpRequestGrant::new(
@@ -1324,19 +1293,15 @@ fn fetch_to_localhost_never_contacts_a_non_loopback_address(cx: &mut TestAppCont
         .scheme("http")
         .port(port)]),
     );
+    runtime.use_direct_http_for_tests();
     context.run_until_parked();
     draw(&mut context, &view);
     let rendered = snapshot(&mut context, &view);
     assert!(
         rendered.contains("200|true|local"),
-        "localhost fetch missed loopback: {rendered}"
+        "localhost fetch missed loopback (pin missing?): {rendered}"
     );
     loopback_server.join().expect("loopback server");
-    alien_server.join().expect("alien server");
-    assert!(
-        !alien_hit.load(Ordering::SeqCst),
-        "localhost resolved to a non-loopback address"
-    );
 }
 
 #[gpui::test]
