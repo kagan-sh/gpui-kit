@@ -1083,6 +1083,7 @@ impl ButtonVariant {
 
     fn border_color(&self, outline: bool, cx: &mut App) -> Hsla {
         match self {
+            Self::Default if outline => cx.theme().muted.opacity(0.7),
             Self::Default => cx.theme().input,
             Self::Secondary => cx.theme().border,
             Self::Primary => cx.theme().primary,
