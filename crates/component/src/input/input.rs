@@ -21,7 +21,6 @@ use rust_i18n::t;
 
 use super::state::{TextInputState, sync_focused_input_registry};
 use super::{InputContentType, InputState, sync_native_content_type};
-use crate::ThemeStyled as _;
 
 /// Set when the platform draws the touch selection UI of a focused input.
 #[derive(Default)]
@@ -808,7 +807,7 @@ impl RenderOnce for Input {
             .refine_style(&self.style)
             .when(
                 focused && self.appearance && self.bordered && self.focus_bordered,
-                |this| this.focus_ring_style(window, cx),
+                |this| this.border_color(cx.theme().ring),
             )
             .children(prefix.map(|p| {
                 div()
@@ -1406,5 +1405,34 @@ mod tests {
 
         cx.update(|_, cx| set_native_touch_selection(false, cx));
         assert!(overlay(cx) > 0);
+    }
+
+    #[gpui::test]
+    fn focused_input_draws_its_ring_on_the_edge_without_an_outer_band(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{AppContext as _, Focusable as _, Render};
+
+        struct Probe {
+            input: Entity<InputState>,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+                div().child(Input::new(&self.input))
+            }
+        }
+
+        cx.update(crate::init);
+        let (probe, cx) = cx.add_window_view(|window, cx| Probe {
+            input: cx.new(|cx| InputState::new(window, cx)),
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let focus = probe.read_with(cx, |probe, cx| probe.input.read(cx).focus_handle(cx));
+        cx.update(|window, cx| {
+            focus.focus(window, cx);
+            window.draw(cx).clear(cx);
+        });
+        assert!(cx.update(|window, _| focus.is_focused(window)));
+        assert!(cx.debug_bounds("focus-ring").is_none());
     }
 }
