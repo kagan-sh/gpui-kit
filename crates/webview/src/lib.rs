@@ -6,12 +6,30 @@ mod composition;
 mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+mod windows;
 
 #[cfg(all(feature = "gpui-fast", target_os = "macos"))]
 use composition::NativeWebViewSurface;
 #[cfg(all(feature = "gpui-fast", target_os = "linux"))]
 use linux::NativeWebViewSurface;
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+use windows::NativeWebViewSurface;
 
+#[cfg(all(
+    feature = "gpui-fast",
+    feature = "windows-composition",
+    target_os = "windows"
+))]
+use std::path::PathBuf;
 use std::{cell::Cell, ops::Deref, rc::Rc};
 
 use wry::Rect;
@@ -21,6 +39,156 @@ use gpui::{
     Focusable, GlobalElementId, Hitbox, InteractiveElement, IntoElement, LayoutId, MouseDownEvent,
     ParentElement as _, Pixels, Render, Size, Style, Styled as _, Window, canvas, div,
 };
+
+/// Whether the page may claim a cursor style at the pointer.
+///
+/// The overlay pointer layer is hovered only while it is the topmost hitbox there.
+/// When a menu opens under a still pointer, the layer is no longer hovered, so the
+/// page must not keep an I-beam or hand above the menu.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn page_owns_pointer_cursor(pointer_in_page: bool, layer_hovered: bool) -> bool {
+    pointer_in_page && layer_hovered
+}
+
+/// What a move over the Windows page pointer layer should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayerMove {
+    deliver: bool,
+    leave: bool,
+}
+
+/// Forward while hovered or while a press is captured; leave when hover ends
+/// without a captured press (composition never sends MouseExited for the layer).
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_move(hovered: bool, was_hovered: bool, capturing: bool) -> LayerMove {
+    LayerMove {
+        deliver: hovered || capturing,
+        leave: was_hovered && !hovered && !capturing,
+    }
+}
+
+/// A press is taken only while the layer is hovered.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_down(hovered: bool) -> bool {
+    hovered
+}
+
+/// What a release over the Windows page pointer layer should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LayerUp {
+    deliver: bool,
+    leave: bool,
+}
+
+/// Keep the release with a captured press even off the layer; leave once the
+/// last captured button goes up away from the page.
+#[cfg_attr(
+    not(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    )),
+    allow(dead_code)
+)]
+fn layer_pointer_up(hovered: bool, button_captured: bool, other_captured: bool) -> LayerUp {
+    LayerUp {
+        deliver: hovered || button_captured,
+        leave: button_captured && !hovered && !other_captured,
+    }
+}
+
+#[cfg(test)]
+mod page_cursor_tests {
+    use super::{LayerMove, LayerUp, layer_pointer_down, layer_pointer_move, layer_pointer_up};
+
+    #[test]
+    fn page_cursor_yields_when_an_overlay_owns_the_pointer() {
+        assert!(super::page_owns_pointer_cursor(true, true));
+        assert!(!super::page_owns_pointer_cursor(true, false));
+        assert!(!super::page_owns_pointer_cursor(false, true));
+        assert!(!super::page_owns_pointer_cursor(false, false));
+    }
+
+    #[test]
+    fn layer_sends_leave_when_hover_ends_without_a_capture() {
+        assert_eq!(
+            layer_pointer_move(false, true, false),
+            LayerMove {
+                deliver: false,
+                leave: true,
+            }
+        );
+        assert_eq!(
+            layer_pointer_move(false, true, true),
+            LayerMove {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_move(true, false, false),
+            LayerMove {
+                deliver: true,
+                leave: false,
+            }
+        );
+    }
+
+    #[test]
+    fn layer_keeps_a_drag_until_release_even_off_the_page() {
+        assert!(layer_pointer_down(true));
+        assert!(!layer_pointer_down(false));
+        assert_eq!(
+            layer_pointer_up(false, true, false),
+            LayerUp {
+                deliver: true,
+                leave: true,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(false, true, true),
+            LayerUp {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(true, false, false),
+            LayerUp {
+                deliver: true,
+                leave: false,
+            }
+        );
+        assert_eq!(
+            layer_pointer_up(false, false, false),
+            LayerUp {
+                deliver: false,
+                leave: false,
+            }
+        );
+    }
+}
 
 // `gpui-kit` selects the GPUI backend; this crate's `gpui-fast` feature only follows it, so
 // the two must agree. A mismatch would otherwise keep the gpui-pre attachment on GPUI Fast.
@@ -55,8 +223,9 @@ impl WebViewHandle {
 /// A webview based on wry WebView.
 ///
 /// With the `gpui-fast` feature, macOS and Linux host the native view in a window
-/// composition surface, so deferred GPUI overlays render above the page. Without it, the
-/// native view covers GPUI content in its bounds and extends past a container that clips it.
+/// composition surface, so deferred GPUI overlays render above the page. Windows does the
+/// same when `windows-composition` is also on. Without that, the native view covers GPUI
+/// content in its bounds and extends past a container that clips it.
 ///
 /// [experimental]
 pub struct WebView {
@@ -68,8 +237,22 @@ pub struct WebView {
     zoom: Cell<f64>,
     /// Whether the last geometry update failed, so each failure is logged once until it recovers.
     geometry_failed: Cell<bool>,
-    #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+    #[cfg(all(
+        feature = "gpui-fast",
+        any(
+            target_os = "macos",
+            target_os = "linux",
+            all(feature = "windows-composition", target_os = "windows")
+        )
+    ))]
     composition: Option<NativeWebViewSurface>,
+    /// Removed after the native page closes. WebView2 must finish with the folder first.
+    #[cfg(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    ))]
+    user_data: Option<PathBuf>,
     /// The GPUI scale factor the page zoom was last matched to.
     #[cfg(target_os = "linux")]
     scale_factor: Cell<f32>,
@@ -81,6 +264,14 @@ pub struct WebView {
 impl Drop for WebView {
     fn drop(&mut self) {
         self.hide();
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if let Some(surface) = self.composition.take() {
+            surface.release(self.webview.clone(), self.user_data.take());
+        }
         #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
         if let Some(surface) = self.composition.take() {
             surface.release(self.webview.clone());
@@ -119,13 +310,35 @@ impl WebView {
             webview: Rc::new(webview),
             #[cfg(all(feature = "gpui-fast", target_os = "macos"))]
             composition,
-            #[cfg(all(feature = "gpui-fast", target_os = "linux"))]
+            #[cfg(all(
+                feature = "gpui-fast",
+                any(
+                    target_os = "linux",
+                    all(feature = "windows-composition", target_os = "windows")
+                )
+            ))]
             composition: None,
+            #[cfg(all(
+                feature = "gpui-fast",
+                feature = "windows-composition",
+                target_os = "windows"
+            ))]
+            user_data: None,
             #[cfg(target_os = "linux")]
             scale_factor: Cell::new(window.scale_factor()),
             #[cfg(target_os = "linux")]
             origin,
         }
+    }
+
+    /// Delete `path` after the native page has closed. WebView2 keeps files open until then.
+    #[cfg(all(
+        feature = "gpui-fast",
+        feature = "windows-composition",
+        target_os = "windows"
+    ))]
+    pub fn remove_user_data_when_closed(&mut self, path: PathBuf) {
+        self.user_data = Some(path);
     }
 
     /// Build a webview as a child of `window`, performing the platform setup Wry requires.
@@ -139,6 +352,19 @@ impl WebView {
         window: &mut Window,
         cx: &mut App,
     ) -> wry::Result<Self> {
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        {
+            return windows::build(builder, window, cx);
+        }
+        #[cfg(not(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        )))]
         #[cfg(target_os = "linux")]
         let webview = {
             let parent = linux::X11Parent::new(window)?;
@@ -157,16 +383,35 @@ impl WebView {
 
             builder.build_as_child(&parent)?
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(all(
+            not(target_os = "linux"),
+            not(all(
+                feature = "gpui-fast",
+                feature = "windows-composition",
+                target_os = "windows"
+            ))
+        ))]
         let webview = builder.build_as_child(&*window)?;
 
+        #[cfg(not(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        )))]
         Ok(Self::new(webview, window, cx))
     }
 
     /// Set window-relative bounds, including offscreen loading bounds.
     /// With window composition, position the managed container and its child together.
     pub fn set_bounds(&self, bounds: Rect) -> wry::Result<()> {
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             return surface
                 .set_bounds(&self.webview, bounds)
@@ -187,7 +432,14 @@ impl WebView {
         let visible = document.intersect(&clip);
         if visible.is_empty() || !self.visible.get() {
             self.set_native_visible(false)?;
-            #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+            #[cfg(all(
+                feature = "gpui-fast",
+                any(
+                    target_os = "macos",
+                    target_os = "linux",
+                    all(feature = "windows-composition", target_os = "windows")
+                )
+            ))]
             if let Some(surface) = &self.composition {
                 // Hidden preparation still gives WebKit its real layout width.
                 if self.visible.get() && !document.is_empty() {
@@ -196,7 +448,14 @@ impl WebView {
             }
             return Ok(());
         }
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             surface.set_geometry(&self.webview, document, visible)?;
             surface.set_visible(true)?;
@@ -227,7 +486,14 @@ impl WebView {
     // visibility preference, so prepaint can retry when the view becomes unclipped.
     fn set_native_visible(&self, visible: bool) -> wry::Result<()> {
         self.webview.set_visible(visible)?;
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &self.composition {
             surface
                 .set_visible(visible)
@@ -441,7 +707,14 @@ impl Element for WebViewElement {
         }
 
         let parent = self.parent.read(cx);
-        #[cfg(all(feature = "gpui-fast", any(target_os = "macos", target_os = "linux")))]
+        #[cfg(all(
+            feature = "gpui-fast",
+            any(
+                target_os = "macos",
+                target_os = "linux",
+                all(feature = "windows-composition", target_os = "windows")
+            )
+        ))]
         if let Some(surface) = &parent.composition {
             surface.set_scale_factor(window.scale_factor());
         }
@@ -466,7 +739,17 @@ impl Element for WebViewElement {
         }
 
         // The native view covers this area, so GPUI content below it must not receive input.
-        Some(window.insert_hitbox(visible, gpui::HitboxBehavior::BlockMouse))
+        let hitbox = window.insert_hitbox(visible, gpui::HitboxBehavior::BlockMouse);
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if let Some(surface) = parent.composition.as_ref() {
+            let layer = surface.insert_pointer_layer(visible, window).ok();
+            surface.set_pointer_layer(layer);
+        }
+        Some(hitbox)
     }
 
     fn paint(
@@ -477,8 +760,65 @@ impl Element for WebViewElement {
         _: &mut Self::RequestLayoutState,
         hitbox: &mut Self::PrepaintState,
         window: &mut Window,
-        _: &mut App,
+        cx: &mut App,
     ) {
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if hitbox.is_some() {
+            let painted = {
+                let parent = self.parent.read(cx);
+                parent.composition.as_ref().and_then(|surface| {
+                    let layer = surface.take_pointer_layer()?;
+                    let (page_cursor, current_cursor) = surface.cursor_cells();
+                    let (pointer_over, pointer_buttons, handle, async_cx) =
+                        surface.pointer_tracking();
+                    let (origin, scale) = surface.origin_and_scale();
+                    Some((
+                        page_cursor,
+                        current_cursor,
+                        pointer_over,
+                        pointer_buttons,
+                        layer,
+                        parent.webview.clone(),
+                        origin,
+                        scale,
+                        handle,
+                        async_cx,
+                    ))
+                })
+            };
+            if let Some((
+                page_cursor,
+                current_cursor,
+                pointer_over,
+                pointer_buttons,
+                layer,
+                webview,
+                origin,
+                scale,
+                handle,
+                async_cx,
+            )) = painted
+            {
+                windows::paint_cursor_for_page(
+                    &page_cursor,
+                    &current_cursor,
+                    &pointer_over,
+                    &pointer_buttons,
+                    &layer,
+                    &webview,
+                    origin,
+                    scale,
+                    handle,
+                    &async_cx,
+                    window,
+                    cx,
+                );
+            }
+        }
         let bounds = hitbox.clone().map(|h| h.bounds).unwrap_or(bounds);
         window.with_content_mask(Some(ContentMask { bounds }), |window| {
             let webview = self.view.clone();
