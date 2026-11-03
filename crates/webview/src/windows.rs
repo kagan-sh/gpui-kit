@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use anyhow::Result;
 use gpui::{
-    AnyWindowHandle, AsyncApp, Bounds, DispatchEventResult, MouseButton, Pixels, PlatformInput,
-    Point, ScrollDelta, Window, point, px, size,
+    AnyWindowHandle, AppContext as _, AsyncApp, Bounds, DispatchEventResult, MouseButton, Pixels,
+    PlatformInput, Point, ScrollDelta, Window, point, px, size,
 };
 use wry::dpi::{LogicalPosition, LogicalSize};
 use wry::{PageButton, PagePointer, WebViewExtWindows as _};
@@ -34,7 +34,10 @@ pub(super) fn build(
     if let Err(error) = surface.forward(page.clone(), window) {
         return Err(surface.abandon(window, io_error(error)));
     }
-    if let Err(error) = surface.bind(page) {
+    if let Err(error) = surface.bind(page.clone()) {
+        return Err(surface.abandon(window, io_error(error)));
+    }
+    if let Err(error) = surface.forward_cursor(page) {
         return Err(surface.abandon(window, io_error(error)));
     }
     view.composition = Some(surface);
@@ -176,29 +179,68 @@ impl NativeWebViewSurface {
             }))
     }
 
+    fn forward_cursor(&self, webview: Rc<wry::WebView>) -> Result<()> {
+        webview
+            .on_cursor_changed(Box::new(|cursor| {
+                apply_page_cursor(cursor);
+            }))
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    }
+
     pub(super) fn release(self, webview: Rc<wry::WebView>, user_data: Option<PathBuf>) {
-        self.cx
-            .clone()
+        let surface_id = self.surface.id();
+        let window = self.window;
+        let cx = self.cx.clone();
+        // Drop the surface handle so the recovery callback releases its page Rc.
+        drop(self.surface);
+        cx.clone()
             .spawn(async move |cx| {
-                drop(webview);
-                if let Some(path) = user_data {
-                    remove_user_data(&path);
-                }
-                let result = self.window.update(cx, |_, window, _| {
+                let exited = user_data
+                    .as_ref()
+                    .and_then(|_| webview.browser_process_exited().ok());
+                // Clear input forwarding before closing the native page.
+                let result = window.update(cx, |_, window, _| {
                     window
                         .enable_window_composition()?
-                        .remove_surface(self.surface.id())
+                        .remove_surface(surface_id)
                 });
                 if let Ok(Err(error)) = result {
                     log::warn!("cannot release WebView composition surface: {error:#}");
+                }
+                drop(webview);
+                if let Some(path) = user_data {
+                    cx.background_spawn(async move {
+                        if let Some(exited) = exited {
+                            let _ = exited.recv_timeout(Duration::from_secs(5));
+                        }
+                        remove_user_data(&path);
+                    })
+                    .detach();
                 }
             })
             .detach();
     }
 }
 
+fn apply_page_cursor(cursor: Option<*mut std::ffi::c_void>) {
+    use windows::Win32::UI::WindowsAndMessaging::{HCURSOR, IDC_ARROW, LoadCursorW, SetCursor};
+    // SAFETY: WebView2's HCURSOR is valid for SetCursor; IDC_ARROW is a shared system cursor.
+    unsafe {
+        match cursor {
+            Some(raw) => {
+                let _ = SetCursor(Some(HCURSOR(raw)));
+            }
+            None => {
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    let _ = SetCursor(Some(arrow));
+                }
+            }
+        }
+    }
+}
+
 fn remove_user_data(path: &std::path::Path) {
-    for _ in 0..20 {
+    for _ in 0..40 {
         match std::fs::remove_dir_all(path) {
             Ok(()) => return,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return,
@@ -227,7 +269,10 @@ fn deliver(
                 shift: event.modifiers.shift,
             }
         }
-        PlatformInput::MouseExited(_) => PagePointer::Leave,
+        PlatformInput::MouseExited(_) => {
+            apply_page_cursor(None);
+            PagePointer::Leave
+        }
         PlatformInput::MouseDown(event) => {
             if event.button == MouseButton::Left {
                 let _ = webview.focus();
