@@ -263,11 +263,15 @@ impl NativeWebViewSurface {
                 }
                 drop(webview);
                 if let Some(path) = user_data {
-                    cx.background_spawn(async move {
-                        if let Some((rx, env)) = exited {
+                    // The environment is not Send; keep it on this executor until the wait ends.
+                    if let Some((rx, env)) = exited {
+                        cx.background_spawn(async move {
                             let _ = rx.recv_timeout(Duration::from_secs(5));
-                            drop(env);
-                        }
+                        })
+                        .await;
+                        drop(env);
+                    }
+                    cx.background_spawn(async move {
                         remove_user_data(&path);
                     })
                     .detach();
