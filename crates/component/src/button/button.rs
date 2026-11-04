@@ -1083,7 +1083,7 @@ impl ButtonVariant {
 
     fn border_color(&self, outline: bool, cx: &mut App) -> Hsla {
         match self {
-            Self::Default if outline => cx.theme().muted.opacity(0.7),
+            Self::Default if outline => cx.theme().muted_foreground.opacity(0.7),
             Self::Default => cx.theme().input,
             Self::Secondary => cx.theme().border,
             Self::Primary => cx.theme().primary,
@@ -1433,6 +1433,17 @@ mod tests {
             Some("Save"),
             "and must not change what is drawn"
         );
+    }
+
+    #[gpui::test]
+    fn outline_default_border_is_the_muted_text_color_at_seventy_percent(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(crate::init);
+        cx.update(|cx| {
+            let expected = cx.theme().muted_foreground.opacity(0.7);
+            assert_eq!(ButtonVariant::Default.border_color(true, cx), expected);
+        });
     }
 
     #[gpui::test]
