@@ -24,7 +24,10 @@
 
 use std::rc::Rc;
 
-use gpui::{Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
+use gpui::{
+    Context, EntityId, EventEmitter, IntoElement, ParentElement as _, Render, Styled as _, Window,
+    div,
+};
 
 use crate::{
     engine::{ShellRuntime, ViewObject},
@@ -86,6 +89,15 @@ pub struct ScriptView {
     ownership: ViewOwnership,
     runtime: Rc<ShellRuntime>,
 }
+
+/// Emitted after a successful build publishes a new snapshot.
+///
+/// Subscribers can re-read [`ScriptView::snapshot`] and request their own
+/// repaint. Unlike [`Context::notify`], this does not invalidate the view, so a
+/// publication does not materialize its snapshot twice.
+pub struct SnapshotPublished;
+
+impl EventEmitter<SnapshotPublished> for ScriptView {}
 
 /// Which cleanup boundary this view owns.
 #[derive(Clone, Copy)]
@@ -220,6 +232,12 @@ impl ScriptView {
         self.reload_error.as_deref().or(self.error.as_deref())
     }
 
+    /// The last successfully published description, absent until the first successful build.
+    ///
+    /// Each successful build emits [`SnapshotPublished`] after publication,
+    /// including the first build during rendering. Failed builds keep the
+    /// previous snapshot; ordinary repaints do not publish or emit. Subscribe
+    /// before the first render to receive its event, and retain the subscription.
     pub fn snapshot(&self) -> Option<&RenderSnapshot> {
         self.current.as_ref()
     }
@@ -353,6 +371,7 @@ impl ScriptView {
                 // before last: dropping it releases its callbacks.
                 self.previous = self.current.replace(snapshot);
                 self.error = None;
+                cx.emit(SnapshotPublished);
             }
             Err(error) => self.error = Some(error.to_string()),
         }

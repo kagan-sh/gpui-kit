@@ -85,6 +85,7 @@ pub mod host;
 pub mod host_modules;
 pub(crate) mod materialize;
 pub mod metrics;
+mod mount_view_error;
 pub(crate) mod paint_only;
 pub(crate) mod path;
 pub mod plugin;
@@ -131,6 +132,7 @@ pub use host_modules::{
     HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, RESERVED_SPECIFIERS,
 };
 pub use metrics::RuntimeMetrics;
+pub use mount_view_error::MountViewError;
 pub use root::{DialogOptions, ShellRoot, ToastLevel, ToastRequest};
 pub use runtime::{
     ExitHandler, ExitRequest, clear_exit_handler, failure_surface, on_exit_request,
@@ -138,7 +140,7 @@ pub use runtime::{
 };
 pub use scope::{ScopePhase, with_current_app};
 pub use snapshot::RenderSnapshot;
-pub use view::ScriptView;
+pub use view::{ScriptView, SnapshotPublished};
 pub use watch::Watcher;
 
 use std::path::PathBuf;

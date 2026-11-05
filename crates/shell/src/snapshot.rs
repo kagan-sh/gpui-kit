@@ -125,6 +125,19 @@ impl RenderSnapshot {
         self.inner.arena.structure()
     }
 
+    /// The root's component name, without entering the VM.
+    ///
+    /// Registered components return their descriptor's name (for example,
+    /// `WebView`). Built-in components use their script names, such as `div`
+    /// or `text`. Returns `None` when the root has no component.
+    pub fn root_component_name(&self) -> Option<&str> {
+        self.inner
+            .arena
+            .node(self.inner.root)?
+            .component()
+            .map(|component| component.name())
+    }
+
     /// The description as text. Rendering never needs a GPU to be verified, and
     /// reading a published snapshot never needs the VM.
     pub fn debug_tree(&self) -> String {

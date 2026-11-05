@@ -832,6 +832,7 @@ export default class Registered extends View {
         ));
     });
 
+    assert_eq!(snapshot.root_component_name(), Some("TestBox"));
     assert!(tree.starts_with("TestBox"), "unexpected tree: {tree}");
     assert!(tree.contains(":tone(registered)"), "missing method: {tree}");
     assert_eq!(*materialized.lock().unwrap(), ["alpha", "quiet"]);
@@ -1828,6 +1829,114 @@ export default class Main { render() { return "main"; } }
     assert!(Rc::ptr_eq(&default_policy, &named_policy));
     assert_eq!(crate::policy::default().application(), "app");
     assert!(!crate::policy::default().capabilities().has_write_access());
+}
+
+#[gpui::test]
+fn named_mount_errors_report_generation_release_without_parsing_messages(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let other_runtime = ShellRuntime::new_isolated().unwrap();
+    let directory = std::env::temp_dir().join(format!(
+        "gpui-shell-typed-mount-errors-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::write(
+        directory.join("main.js"),
+        r#"
+export const notAView = 1;
+export class Good { render() { return "side"; } }
+export class BadConstructor {
+  constructor() { throw new Error("export `fake` pinned gpui-shell constructor"); }
+}
+export class BadInit {
+  init() { throw new Error("export `fake` pinned gpui-shell init"); }
+}
+export default class Main { render() { return "main"; } }
+"#,
+    )
+    .unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    for paint_only in [false, true] {
+        for failing in ["BadConstructor", "BadInit"] {
+            let application = context
+                .update(|window, cx| {
+                    let (_scope, _) = crate::scope::enter_runtime(
+                        &runtime,
+                        window,
+                        cx,
+                        crate::scope::ScopePhase::Event,
+                        None,
+                    );
+                    runtime.load_application(&directory, "main.js")
+                })
+                .unwrap();
+            let mount =
+                |context: &mut VisualTestContext, runtime: &Rc<ShellRuntime>, export: &str| {
+                    context.update(|window, cx| {
+                        if paint_only {
+                            runtime.mount_paint_only_view(&application, export, window, cx)
+                        } else {
+                            runtime.mount_exported_view(&application, export, window, cx)
+                        }
+                    })
+                };
+            let check = |error: anyhow::Error, released| {
+                let typed = error
+                    .downcast_ref::<crate::MountViewError>()
+                    .expect("every named mount failure must have a typed classification");
+                assert_eq!(typed.is_generation_released(), released, "{error:#}");
+                assert!(std::error::Error::source(typed).is_some());
+            };
+            check(mount(&mut context, &runtime, "Good").err().unwrap(), false);
+            let default = context
+                .update(|window, cx| runtime.mount_application(&application, window, cx))
+                .unwrap();
+            let generation =
+                context.update(|_, cx| default.read(cx).application_generation().unwrap());
+            check(
+                mount(&mut context, &other_runtime, "Good").err().unwrap(),
+                false,
+            );
+            for export in ["missing", "notAView"] {
+                check(mount(&mut context, &runtime, export).err().unwrap(), false);
+                assert!(
+                    generation.is_active(),
+                    "export lookup must preserve the default view"
+                );
+            }
+            let snapshot = context
+                .update(|window, cx| {
+                    let object = default.read(cx).object().clone();
+                    runtime.build_snapshot(
+                        &object,
+                        Some(default.clone()),
+                        crate::policy::default(),
+                        window,
+                        cx,
+                    )
+                })
+                .expect("the default export still renders after failed export checks");
+            assert_eq!(snapshot.root_component_name(), Some("text"));
+            let named = mount(&mut context, &runtime, "Good").unwrap();
+            context.update(|_, _| drop(named));
+            assert!(generation.is_active());
+            let error = mount(&mut context, &runtime, failing).err().unwrap();
+            assert!(
+                error
+                    .to_string()
+                    .contains("export `fake` pinned gpui-shell")
+            );
+            check(error, true);
+            assert!(
+                !generation.is_active(),
+                "{failing} must retire the default generation"
+            );
+            context.update(|_, _| drop(default));
+        }
+    }
+    std::fs::remove_dir_all(directory).unwrap();
 }
 
 /// Dropping a named export leaves the default export's generation mounted.

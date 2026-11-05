@@ -1576,6 +1576,11 @@ impl ShellRuntime {
     /// or one that is not a class, is an error that leaves the handle
     /// unconsumed. As for the default export, a construction or initialization
     /// failure releases the whole application generation.
+    ///
+    /// # Errors
+    /// Errors downcast to [`crate::MountViewError`]; its
+    /// [`is_generation_released`](crate::MountViewError::is_generation_released)
+    /// method reports whether the host must discard the application.
     pub fn mount_exported_view(
         self: &Rc<Self>,
         application: &LoadedApplication,
@@ -1583,14 +1588,19 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
-        self.check_owner(application)?;
+        self.check_owner(application)
+            .map_err(crate::MountViewError::before_construction)?;
         let policy = application
             .mount_policy
             .borrow()
             .clone()
-            .context("the default export has not been mounted")?;
-        let view_type = self.exported_view_type(&application.view_type, export)?;
+            .context("the default export has not been mounted")
+            .map_err(crate::MountViewError::before_construction)?;
+        let view_type = self
+            .exported_view_type(&application.view_type, export)
+            .map_err(crate::MountViewError::before_construction)?;
         self.instantiate_view_owning(&view_type, policy, false, window, cx)
+            .map_err(crate::MountViewError::after_construction)
     }
 
     /// Mounts a named exported view that may only paint, as
@@ -1601,6 +1611,10 @@ impl ShellRuntime {
     /// pass. Its code may not reach the window. The first breach makes the view
     /// fail for good with a [`ScriptView::build_error`] naming it, and the view
     /// paints nothing. See [`crate::paint_only`].
+    ///
+    /// # Errors
+    /// Mount failures downcast to [`crate::MountViewError`], as with
+    /// [`Self::mount_exported_view`].
     pub fn mount_paint_only_view(
         self: &Rc<Self>,
         application: &LoadedApplication,
@@ -1608,15 +1622,20 @@ impl ShellRuntime {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Entity<ScriptView>> {
-        self.check_owner(application)?;
+        self.check_owner(application)
+            .map_err(crate::MountViewError::before_construction)?;
         let policy = application
             .mount_policy
             .borrow()
             .as_ref()
             .map(|policy| Rc::new(policy.painting_only()))
-            .context("the default export has not been mounted")?;
-        let view_type = self.exported_view_type(&application.view_type, export)?;
+            .context("the default export has not been mounted")
+            .map_err(crate::MountViewError::before_construction)?;
+        let view_type = self
+            .exported_view_type(&application.view_type, export)
+            .map_err(crate::MountViewError::before_construction)?;
         self.instantiate_view_owning(&view_type, policy, false, window, cx)
+            .map_err(crate::MountViewError::after_construction)
     }
 
     fn check_owner(self: &Rc<Self>, application: &LoadedApplication) -> Result<()> {

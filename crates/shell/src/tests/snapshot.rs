@@ -74,6 +74,59 @@ export default class NativePath extends View {
 "##;
 
 #[gpui::test]
+fn snapshot_publication_notifies_subscribers_after_first_build_and_replacement(
+    cx: &mut TestAppContext,
+) {
+    use std::{cell::RefCell, rc::Rc};
+
+    let (runtime, mut context, view) = script_view(cx, FLAKY);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let observed = seen.clone();
+    let _subscription = context.update(|_, cx| {
+        assert!(view.read(cx).snapshot().is_none());
+        cx.subscribe(&view, move |view, _: &crate::SnapshotPublished, cx| {
+            observed.borrow_mut().push(
+                view.read(cx)
+                    .snapshot()
+                    .and_then(|snapshot| snapshot.root_component_name())
+                    .map(str::to_owned),
+            );
+        })
+    });
+    render_once(&mut context, &view);
+    assert_eq!(*seen.borrow(), [Some("v_flex".to_owned())]);
+    for _ in 0..3 {
+        render_once(&mut context, &view);
+    }
+    assert_eq!(seen.borrow().len(), 1, "ordinary paints must not notify");
+
+    let replacement = FLAKY.replace("v_flex().child(\"good\")", "div().child(\"new\")");
+    let view_type = runtime.load_source("replacement", &replacement).unwrap();
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .unwrap();
+    view.update(&mut context, |view, _| view.replace_object(object));
+    render_once(&mut context, &view);
+    assert_eq!(
+        *seen.borrow(),
+        [Some("v_flex".to_owned()), Some("div".to_owned())]
+    );
+
+    set_flag(&mut context, &view, &runtime);
+    render_once(&mut context, &view);
+    assert_eq!(seen.borrow().len(), 2, "a failed build must not publish");
+    assert_eq!(
+        context.update(|_, cx| view
+            .read(cx)
+            .snapshot()
+            .unwrap()
+            .root_component_name()
+            .map(str::to_owned)),
+        Some("div".to_owned())
+    );
+}
+
+#[gpui::test]
 fn path_builder_freezes_commands_in_the_render_snapshot(cx: &mut TestAppContext) {
     let (_runtime, mut context, view) = script_view(cx, PATH);
 
