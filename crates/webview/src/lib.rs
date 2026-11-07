@@ -310,6 +310,9 @@ impl Drop for WebView {
         if let Some(surface) = self.composition.as_ref() {
             let _ = surface.set_visible(false);
         }
+        // Linux must not hide the surface before the WebKit window is destroyed.
+        // Hiding it first makes GDK configure a window X has already destroyed.
+        #[cfg(not(target_os = "linux"))]
         self.hide();
         #[cfg(all(
             feature = "gpui-fast",

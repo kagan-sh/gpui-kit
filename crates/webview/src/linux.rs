@@ -250,6 +250,11 @@ impl NativeWebViewSurface {
             .clone()
             .spawn(async move |cx| {
                 drop(webview);
+                // WebKit's destroy configures its window. Run those events before the
+                // surface window that contains it is removed.
+                while gtk::events_pending() {
+                    gtk::main_iteration_do(false);
+                }
                 super::remove_surface_when_free(self.window, cx, self.surface.id()).await;
             })
             .detach();
