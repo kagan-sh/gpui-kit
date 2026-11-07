@@ -272,7 +272,7 @@ pub struct WebView {
         all(feature = "windows-composition", target_os = "windows")
     )
 ))]
-pub(super) async fn remove_surface_when_free(
+pub(crate) async fn remove_surface_when_free(
     window: gpui::AnyWindowHandle,
     cx: &mut gpui::AsyncApp,
     surface: gpui::CompositionSurfaceId,
