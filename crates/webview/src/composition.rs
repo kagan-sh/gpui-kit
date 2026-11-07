@@ -112,14 +112,7 @@ impl NativeWebViewSurface {
             .clone()
             .spawn(async move |cx| {
                 self.original_parent.addSubview(&webview.webview());
-                let result = self.window.update(cx, |_, window, _| {
-                    window
-                        .enable_window_composition()?
-                        .remove_surface(self.surface.id())
-                });
-                if let Ok(Err(error)) = result {
-                    log::warn!("cannot release WebView composition surface: {error:#}");
-                }
+                super::remove_surface_when_free(self.window, cx, self.surface.id()).await;
             })
             .detach();
     }

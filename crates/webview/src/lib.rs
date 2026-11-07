@@ -261,8 +261,55 @@ pub struct WebView {
     origin: Rc<Cell<gpui::Point<Pixels>>>,
 }
 
+/// `remove_surface` needs the app. Drop and page callbacks run while it is still
+/// borrowed, and a failed update used to leave the visual in the tree. Retry
+/// until the borrow ends.
+#[cfg(all(
+    feature = "gpui-fast",
+    any(
+        target_os = "macos",
+        target_os = "linux",
+        all(feature = "windows-composition", target_os = "windows")
+    )
+))]
+pub(super) async fn remove_surface_when_free(
+    window: gpui::AnyWindowHandle,
+    cx: &mut gpui::AsyncApp,
+    surface: gpui::CompositionSurfaceId,
+) {
+    use gpui::AppContext as _;
+
+    for _ in 0..30 {
+        match window.update(cx, |_, window, _| {
+            window.enable_window_composition()?.remove_surface(surface)
+        }) {
+            Ok(Ok(())) => return,
+            Ok(Err(error)) => {
+                log::warn!("cannot release WebView composition surface: {error:#}");
+                return;
+            }
+            Err(_) => {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(16))
+                    .await;
+            }
+        }
+    }
+    log::warn!("cannot release WebView composition surface: the window stayed busy");
+}
+
 impl Drop for WebView {
     fn drop(&mut self) {
+        // WebView2 pumps the message loop from `hide`. Hide the visual first, or a
+        // callback that panics while the app is borrowed leaves the last frame up.
+        #[cfg(all(
+            feature = "gpui-fast",
+            feature = "windows-composition",
+            target_os = "windows"
+        ))]
+        if let Some(surface) = self.composition.as_ref() {
+            let _ = surface.set_visible(false);
+        }
         self.hide();
         #[cfg(all(
             feature = "gpui-fast",

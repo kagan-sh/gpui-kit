@@ -300,14 +300,7 @@ impl NativeWebViewSurface {
                     .as_ref()
                     .and_then(|_| webview.browser_process_exited().ok());
                 // Clear input forwarding before closing the native page.
-                let result = window.update(cx, |_, window, _| {
-                    window
-                        .enable_window_composition()?
-                        .remove_surface(surface_id)
-                });
-                if let Ok(Err(error)) = result {
-                    log::warn!("cannot release WebView composition surface: {error:#}");
-                }
+                super::remove_surface_when_free(window, cx, surface_id).await;
                 drop(webview);
                 if let Some(path) = user_data {
                     // The environment is not Send; keep it on this executor until the wait ends.
