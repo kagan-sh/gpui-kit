@@ -93,6 +93,7 @@ fn refused_op(op: &SpecOp) -> Option<String> {
         ))
         .then(|| (*name).to_owned()),
         SpecOp::RegisteredMethod(method) => Some(method.name().to_owned()),
+        SpecOp::GroupHover(..) => Some("group_hover".to_owned()),
         SpecOp::Callback(name, _) | SpecOp::StateStyle(name, _) | SpecOp::Slot(name, _) => {
             Some((*name).to_owned())
         }

@@ -368,7 +368,7 @@ pub fn with_current<R>(f: impl FnOnce(&mut Window, &mut App) -> R) -> Option<R> 
             // Deferred: the view may be the one rendering right now.
             app.defer(move |cx| {
                 view.update(cx, |view, cx| {
-                    view.refuse(crate::paint_only::WINDOW.to_owned(), cx);
+                    view.refuse_paint_only(crate::paint_only::WINDOW.to_owned(), cx);
                     cx.notify();
                 });
             });
