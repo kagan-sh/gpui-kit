@@ -19,6 +19,8 @@ workspace = true
 default = ["component", "assets"]
 # Select GPUI Fast across the core, platforms, and already-enabled layers.
 gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform", "dep:gpui-fast-web", "gpui-base/gpui-fast", "gpui-component?/gpui-fast", "gpui-kit-assets?/gpui-fast"]
+# Offscreen windows render their scene to an image; see GPUI Fast's `offscreen` feature.
+offscreen = ["gpui-fast?/offscreen", "gpui-fast-platform?/offscreen"]
 # The styled component library, `gpui_kit::component`. Initializes `gpui-base` too.
 component = ["dep:gpui-component"]
 # The default icon set for `gpui-component`, `gpui_kit::assets`.
