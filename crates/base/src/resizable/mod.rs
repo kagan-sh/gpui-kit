@@ -108,7 +108,8 @@ impl ResizableState {
         let size = size.unwrap_or(PANEL_MIN_SIZE);
 
         // We make sure that the size always sums up to the container size
-        // by reducing the size of all other panels first.
+        // by reducing the size of all other panels first. Every drawn bound
+        // is now stale, so it is dropped until the next paint measures it.
         let container_size = self.container_size().max(px(1.));
         let total_leftover_size = (container_size - size).max(px(1.));
 
@@ -116,6 +117,7 @@ impl ResizableState {
             let ratio = self.sizes[i] / container_size;
             self.sizes[i] = total_leftover_size * ratio;
             panel.size = Some(self.sizes[i]);
+            panel.bounds = Bounds::default();
         }
 
         if let Some(ix) = ix {
@@ -289,7 +291,11 @@ impl ResizableState {
 
     fn sync_real_panel_sizes(&mut self, _: &App) {
         for (i, panel) in self.panels.iter().enumerate() {
-            self.sizes[i] = panel.bounds.size.along(self.axis);
+            // A panel not drawn since it was added has no bounds yet.
+            let drawn = panel.bounds.size.along(self.axis);
+            if !drawn.is_zero() {
+                self.sizes[i] = drawn;
+            }
         }
     }
 
@@ -1143,5 +1149,100 @@ mod tests {
         let panel = cx.debug_bounds("sized-panel").unwrap();
         assert_eq!(panel.size.width, px(400.));
         assert_eq!(panel.size.height, px(40.));
+    }
+
+    /// A fixed sidebar, a flexible center with a minimum, and a sized aside
+    /// that the caller adds and removes, the way an app shell lays out.
+    struct ShellHarness {
+        aside: bool,
+        state: gpui::Entity<ResizableState>,
+    }
+
+    impl Render for ShellHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().w(px(1072.)).h(px(100.)).child(
+                h_resizable("shell")
+                    .with_state(&self.state)
+                    .child(
+                        resizable_panel()
+                            .flex_none()
+                            .fixed()
+                            .size(px(256.))
+                            .size_range(px(200.)..px(420.))
+                            .child(div().size_full().debug_selector(|| "sh-side".into())),
+                    )
+                    .child(
+                        resizable_panel()
+                            .size_range(px(480.)..Pixels::MAX)
+                            .child(div().size_full().debug_selector(|| "sh-center".into())),
+                    )
+                    .when(self.aside, |group| {
+                        group.child(
+                            resizable_panel()
+                                .flex_none()
+                                .size(px(320.))
+                                .size_range(px(240.)..px(3840.))
+                                .child(div().size_full().debug_selector(|| "sh-aside".into())),
+                        )
+                    }),
+            )
+        }
+    }
+
+    fn shell_widths(cx: &mut VisualTestContext) -> [Pixels; 3] {
+        ["sh-side", "sh-center", "sh-aside"].map(|selector| {
+            cx.debug_bounds(selector)
+                .map_or(px(0.), |bounds| bounds.size.width)
+        })
+    }
+
+    /// An aside added beside a fixed sidebar is drawn at its size, the
+    /// sidebar keeps its own, and a resize made before the aside is first
+    /// drawn does not read the aside as zero wide. The state then matches
+    /// what is drawn, so dragging the aside wide stops where the center
+    /// reaches its minimum without taking room from the fixed sidebar.
+    #[gpui::test]
+    fn an_added_aside_keeps_the_fixed_sidebar_and_stops_at_the_center_minimum(
+        cx: &mut TestAppContext,
+    ) {
+        let state = cx.update(|cx| cx.new(|_| ResizableState::default()));
+        let (view, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| ShellHarness {
+                aside: false,
+                state,
+            }
+        });
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.draw(cx).clear(cx);
+        });
+
+        cx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.aside = true;
+                view.state.update(cx, |state, cx| {
+                    state.insert_panel(Some(px(320.)), None, cx);
+                    state.resize_panel(0, px(256.), window, cx);
+                    state.resize_panel(2, px(320.), window, cx);
+                });
+                cx.notify();
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(shell_widths(cx), [px(256.), px(496.), px(320.)]);
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(256.), px(496.), px(320.)]);
+        });
+
+        cx.update(|window, cx| {
+            state.update(cx, |state, cx| state.resize_panel(2, px(1000.), window, cx));
+            window.draw(cx).clear(cx);
+        });
+        assert_eq!(shell_widths(cx), [px(256.), px(480.), px(336.)]);
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(256.), px(480.), px(336.)]);
+        });
     }
 }
