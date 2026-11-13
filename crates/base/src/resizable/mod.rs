@@ -247,6 +247,9 @@ impl ResizableState {
     pub fn remove_panel(&mut self, panel_ix: usize, cx: &mut Context<Self>) {
         self.panels.remove(panel_ix);
         self.sizes.remove(panel_ix);
+        for panel in &mut self.panels {
+            panel.bounds = Bounds::default();
+        }
         if let Some(resizing_panel_ix) = self.resizing_panel_ix {
             if resizing_panel_ix > panel_ix {
                 self.resizing_panel_ix = Some(resizing_panel_ix - 1);
@@ -1243,6 +1246,34 @@ mod tests {
         assert_eq!(shell_widths(cx), [px(256.), px(480.), px(336.)]);
         state.read_with(cx, |state, _| {
             assert_eq!(state.sizes(), &vec![px(256.), px(480.), px(336.)]);
+        });
+
+        // Removing the aside and adding it again, each followed by a resize
+        // before the next paint, comes back to the same layout.
+        let toggle = |cx: &mut VisualTestContext, aside: bool| {
+            cx.update(|window, cx| {
+                view.update(cx, |view, cx| {
+                    view.aside = aside;
+                    view.state.update(cx, |state, cx| {
+                        if aside {
+                            state.insert_panel(Some(px(320.)), None, cx);
+                        } else {
+                            state.remove_panel(2, cx);
+                        }
+                        state.resize_panel(0, px(256.), window, cx);
+                    });
+                    cx.notify();
+                });
+            });
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        toggle(cx, false);
+        assert_eq!(shell_widths(cx), [px(256.), px(816.), px(0.)]);
+        toggle(cx, true);
+        assert_eq!(shell_widths(cx), [px(256.), px(496.), px(320.)]);
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.sizes(), &vec![px(256.), px(496.), px(320.)]);
         });
     }
 }
